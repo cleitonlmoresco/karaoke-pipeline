@@ -1,0 +1,43 @@
+# Media / outputs
+*.mp3
+*.mp4
+*.mpeg
+*.wav
+*.m4a
+*.flac
+*.ogg
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.gif
+*.bmp
+
+# Project outputs / backups / temp
+saida/
+**/saida/
+_backup*/
+**/_backup*/
+trabalho/
+**/trabalho/
+*.bak
+*.bak-*
+*.tmp
+*.log
+burn_*.out
+*.karaoke.ass
+*.srt
+alignment-debug.json
+alignment-units*.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
