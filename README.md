@@ -4,12 +4,12 @@ Pipeline para **produção de vídeos de karaokê** (letra sincronizada, ASS/SRT
 
 ## Origem / Atribuição
 
-Este projeto foi extraído/adaptado a partir do projeto **Vilm Lyrics Aligner** (`vilm-lyrics-aligner`).
+Este projeto foi **extraído/adaptado** a partir de fluxos e ferramentas relacionados ao **Vilm Lyrics Aligner**.
 
-- **Referência oficial (TODO - confirmar URL exata):** <!-- inserir URL do repositório/site oficial do vilm-lyrics-aligner -->
-- **Observação:** esta atribuição é provisória até confirmação do URL/licença oficial do upstream. Não remover esta seção; atualizar com a referência correta.
+- **Repositório upstream:** https://github.com/banjuman/vilm-lyrics-aligner
+- **Site/produto:** https://voiceandfilm.com/en/product/software/vilm-lyrics-aligner/
 
-> Este repositório **não** é o projeto oficial Vilm Lyrics Aligner; é um pipeline de produção de karaokê baseado/derivado de ferramentas e fluxos relacionados.
+Atribuição: Vilm Lyrics Aligner por banjuman/voiceandfilm (upstream MIT). Este repositório **não** é o projeto oficial Vilm Lyrics Aligner; é um pipeline de produção de karaokê baseado/derivado de ferramentas e fluxos relacionados.
 
 ## O que este repo inclui
 
@@ -38,4 +38,4 @@ Consulte `--help` para parâmetros de fonte, tamanho, margens, pausa, fundo e m�
 
 ## Licença
 
-TODO: definir licença após confirmar a licença/compatibilidade do projeto upstream **vilm-lyrics-aligner**. Não publicar licença final sem essa verificação.
+MIT (ver `LICENSE`). A atribuição ao upstream Vilm Lyrics Aligner (MIT) deve ser preservada.
