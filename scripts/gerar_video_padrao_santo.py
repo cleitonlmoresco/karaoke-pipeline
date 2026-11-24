@@ -506,7 +506,7 @@ def queimar(
     cor = str((cfg.get("background") or {}).get("color") or "#66000A").lstrip("#")
     filtro = (
         "scale={w}:{h}:force_original_aspect_ratio=decrease,"
-        "pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=0x" + cor + ",setsar=1,ass={ass}"
+        "pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=0x" + cor + ",setsar=1,ass={ass},format=yuv420p"
     )
     width = int((cfg.get("output") or {}).get("width") or 1920)
     height = int((cfg.get("output") or {}).get("height") or 1080)
@@ -526,7 +526,9 @@ def queimar(
                 "-vf", filtro.format(w=width, h=height, ass=ass),
                 "-map", "0:v:0", "-map", "0:a:0?", "-sn",
                 "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+                "-profile:v", "main", "-level", "4.1",
                 "-pix_fmt", "yuv420p",
+                "-color_range", "tv",
                 "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
                 temp,
             ],
