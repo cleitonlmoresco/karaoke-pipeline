@@ -1,0 +1,263 @@
+﻿VILM PIPELINE - VIDEOS KARAOKE
+================================
+
+COMO ABRIR
+1. Clique no atalho "Vilm Pipeline" na Area de Trabalho.
+2. O programa abre no seu navegador (Edge, Chrome ou o padrao).
+3. Deixe o icone do Vilm Pipeline na bandeja do Windows (perto do relogio).
+   Ele mantem o programa rodando.
+4. Para fechar de verdade: clique com o botao direito no icone da bandeja
+   e escolha "Sair".
+
+O QUE JA VEM PRONTO
+- Python e todas as bibliotecas incluidas (nao precisa instalar nada).
+- FFmpeg incluido.
+- Modelo Whisper "small" incluido.
+- Modelo Demucs (separacao vocal/instrumental) incluido.
+- Modelo Silero VAD incluido.
+- Funciona offline depois de instalado.
+
+PRESET JA CONFIGURADO (igual ao da foto)
+- Alinhamento: automatico, idioma auto, modelo small, separar vocal/instrumental.
+- Max. caracteres por linha: 30
+- Inicio antecipado: 400 ms
+- Permanencia final: 500 ms
+- Duracao minima: 500 ms / maxima: 10000 ms
+- Intervalo minimo: 80 ms
+- Karaoke progressivo: ligado
+- Fonte: Arial 90, negrito
+- Cor normal: branco / cor ativa: branco / contorno: preto
+- Contorno 3, sombra 1
+- Alinhamento: 5 - centro
+- Margens: 80 horizontal x 80 vertical
+- Linhas antes/depois: 0
+- Linhas por tela: 3
+- Transicao entre telas: Suave (fade), 400 ms
+- Resolucao de saida: 1920x1080 (Full HD)
+
+COMO GERAR UM VIDEO
+1. Em "1. Projeto", digite o nome (ex.: Cantor - Hino) ou abra um projeto existente.
+2. Em "2. Musicas", escolha o hino cantado (audio ou video).
+3. Opcional: escolha tambem o playback em "Musica playback".
+4. Cole somente a letra (sem titulo, creditos ou texto do YouTube).
+5. Confira as configuracoes (o preset acima ja esta aplicado).
+6. Clique em "Gerar MP4 karaoke".
+7. Os videos ficam na pasta do projeto, dentro de "saida":
+   video_cantado.mp4  (hino cantado)
+   video_playback.mp4 (playback, quando selecionado)
+   video_with_lyrics.mp4 (copia do cantado, para compatibilidade)
+
+MUSICA CANTADA + PLAYBACK (OPCIONAL)
+- O alinhamento da letra e feito no hino cantado, porque o playback
+  instrumental nao tem voz para o Whisper reconhecer.
+- O programa compara o cantado com o playback por audio (chroma + DTW),
+  detecta intro/instrumental extra e pequenas diferencas de tempo, e
+  ajusta as linhas do playback automaticamente.
+- O log mostra o deslocamento medio e a confianca da sincronizacao.
+  Confira o video se a confianca for baixa ou se o playback for um
+  arranjo muito diferente.
+- Se o arquivo principal for um playback instrumental, escolha o arquivo
+  do hino cantado como "Musica cantada". O playback vai no campo separado.
+- As duas musicas ficam salvas no projeto e sao lembradas ao abrir de novo.
+- Se a letra mudar, o programa compara o texto com o alinhamento salvo e
+  refaz o alinhamento automaticamente (nao reutiliza tempos antigos).
+- Para remover o playback salvo, abra o projeto, escolha "— sem playback —"
+  em "Musica playback" e gere novamente.
+- Se o playback for mais curto, mais longo ou tiver tempo levemente
+  diferente, o programa escolhe sozinho o melhor modo de sincronizacao.
+  O log informa o modo usado, o deslocamento medio e a confianca.
+
+FORMATOS DE MIDIA ACEITOS
+- Audio: MP3, WAV, M4A, M4B, AAC, FLAC, ALAC, OGG, OGA, OPUS, WMA,
+  AIFF, APE, WV, TTA, DSF, DFF, AMR, AU, AC3, EAC3, DTS, MKA, RA, CAF.
+- Video: MP4, MOV, MKV, WEBM, AVI, M4V, MTS, M2TS, WMV, FLV, F4V,
+  MPG, MPEG, VOB, TS, MXF, OGV, 3GP, ASF, RM, RMVB, DV.
+- A imagem de fundo aceita PNG, JPG, JPEG, WEBP, BMP, GIF, TIF e AVIF.
+
+FUNDO COM IMAGEM (QUANDO A ENTRADA E SO AUDIO)
+1. Abra a aba "Configuracoes".
+2. Em "Tipo de fundo", escolha "Imagem".
+3. Em "Imagem de fundo", selecione o arquivo. A pre-visualizacao e a
+   miniatura aparecem na hora.
+4. Gere o video. A imagem fica salva na pasta "fundo" do projeto e e
+   reutilizada quando o projeto for aberto de novo.
+
+RESOLUCAO DE SAIDA (NOVO)
+- Abra a aba "Configuracoes" e procure o grupo "Saida (FFmpeg)".
+- Escolha uma resolucao pronta:
+    1920x1080  Full HD (padrao)
+    1280x720   HD
+    3840x2160  4K UHD
+    1080x1920  vertical (Reels/Shorts)
+    1080x1080  quadrado
+- Ou escolha "Personalizada" e digite largura e altura em pixels.
+- A largura e a altura precisam ser numeros pares (ex.: 1600x900).
+  O limite e de 320 a 7680 de largura e 240 a 4320 de altura.
+- A letra, o fundo e os videos de entrada sao ajustados para a resolucao
+  escolhida. Se a imagem ou o video tiver formato diferente, o programa
+  encaixa a imagem inteira e preenche as bordas com a cor de fundo.
+- O tamanho da fonte e as margens mantem a mesma proporcao visual do
+  Full HD; a pre-visualizacao ja mostra a proporcao escolhida.
+- Em resolucoes verticais ou quadradas (1080x1920, 1080x1080), reduza a
+  fonte em "Configuracoes" se alguma linha ficar larga demais na tela.
+- A resolucao fica salva em cada projeto e tambem no manifesto.
+
+IDIOMA DO ALINHAMENTO
+- Com o idioma em "auto", o programa agora tambem analisa a letra para
+  reconhecer portugues, espanhol ou ingles. Isso evita que o Whisper
+  escolha o idioma errado e espalhe as linhas fora de tempo.
+- Se o alinhamento antigo tiver linhas com tempo zerado, o programa
+  refaz o alinhamento automaticamente ao gerar de novo.
+
+ONDE FICAM OS PROJETOS
+- Na sua pasta "Musicas" do Windows.
+- Cada hino e uma pasta com letra.txt, midia, saida e trabalho.
+- O instalador nao apaga seus projetos ao desinstalar.
+
+REABRIR E ALTERAR UM PROJETO
+1. Abra o Vilm Pipeline.
+2. Em "Abrir um projeto ja gerado", escolha o projeto.
+3. Altere o que quiser (estilo, cores, tamanho, transicao).
+4. Se for mudar somente o estilo, deixe "Reaproveitar o alinhamento" marcado.
+5. Se for mudar o texto da letra, pode deixar marcado: o programa compara o
+   texto com o alinhamento salvo e refaz o alinhamento automaticamente.
+6. Clique em "Gerar MP4 karaoke".
+
+DICAS
+- Use letras com uma frase por linha.
+- Titulos, creditos (ex.: "Musica de" e o nome do compositor) e textos do
+  YouTube sao ignorados automaticamente, mas o ideal e colar so a letra.
+- Inclua na letra todas as repeticoes que sao cantadas (por exemplo, o refrao
+  repetido no final). O programa nao inventa palavras que nao estao escritas.
+- A primeira geracao pode demorar alguns minutos (Whisper + Demucs).
+- O log mostra o tempo decorrido de cada etapa.
+- Se o navegador nao abrir, acesse: http://127.0.0.1:8765/pipeline
+- Se o antivirus avisar, permita o programa: ele inclui Python e FFmpeg.
+- Nada e enviado para a internet; todo o processamento e local.
+
+REGRAS DE TEMPO DA LETRA (NOVO)
+- Inicio antecipado (lead_ms): 600 ms.
+- Permanencia final (end_pad_ms): 500 ms.
+- Regra proporcional: se o intervalo acustico entre um verso e o proximo for
+  menor que lead_ms + end_pad_ms (1100 ms), esse intervalo e dividido:
+  40% fica como permanencia final do verso anterior e 60% vira inicio
+  antecipado do proximo verso. Intervalos maiores usam 600/500 normais.
+- Duracao minima 500 ms, maxima 10000 ms, intervalo minimo 80 ms.
+- Maximo de caracteres por linha: 30 (corte em pontuacao).
+- Alinhamento automatico por estrofe (linhas em branco da letra).
+
+INTERPRETACAO DE VERSOS / ESTROFES (NOVO)
+- Em "Configuracoes" > "Interpretacao de versos / estrofes" ha 2 opcoes:
+  1) "Por tempo" (padrao): versos com ate 6 segundos de distancia ficam
+     no mesmo slide.
+  2) "Por estrofes": uma linha em branco na letra separa estrofes e comeca
+     um novo slide; dentro da estrofe continua valendo a regra dos 6 segundos.
+- No CLI as mesmas opcoes estao no novo comando "karaoke":
+    python -m lyrics_aligner karaoke letras.srt letra.txt -o karaoke.ass --stanza-mode stanzas
+  Use --stanza-mode time para agrupar somente por tempo (6 s).
+
+PERFIS DE KARAOKe (PRE-SETS)
+- O arquivo "profiles.json" (na raiz da instalacao) guarda os perfis.
+- Dois perfis ja vem configurados:
+  1) "festa-ibuc" (Festa do IBUC 2026): letra Arial 84 preta sem borda,
+     rolagem suave de 600 ms, linha atual no topo, fundo FUNDO IBUC.png,
+     4 s de imagem do titulo no inicio e logo LOGO IBUC.png no final.
+     Pasta de projetos: C:\Users\globaltec\OneDrive\Music\FESTA IBUC\PROJETOS
+  2) "festa-genesis": letra Times New Roman 85/90 preta sem borda, rolagem
+     de 400 ms, ate 4 linhas abaixo da atual, fundo fundo.jpeg de cada projeto.
+     Pasta de projetos: C:\Users\globaltec\Downloads\festa do genesis
+- No aplicativo: aba "Configuracoes" > "Perfil de karaoke (pre-set)".
+  Ao escolher um perfil, todas as configuracoes e a pasta de projetos sao
+  aplicadas automaticamente aos proximos videos. O botao "Salvar configuracao
+  atual neste perfil" grava ajustes personalizados dentro do perfil.
+- Na interface Tk (area de trabalho): o campo "Karaoke profile (pre-set)"
+  no topo aplica os tempos do perfil (maximo de caracteres, duracao maxima,
+  permanencia final e inicio antecipado) aos proximos SRTs gerados. A escolha
+  fica salva nas preferencias.
+- No CLI:
+    python -m lyrics_aligner profiles              (lista os perfis)
+    python -m lyrics_aligner profiles festa-ibuc   (mostra o JSON do perfil)
+    python -m lyrics_aligner karaoke letras.srt letra.txt -o karaoke.ass --profile festa-ibuc
+- O perfil tambem guarda as "extras": tempo/arquivo do intro, logo final,
+  regra de tempo 40/60 e imagem de fundo.
+
+PIPELINE COMPLETO E CONTROLE DE QUALIDADE (NOVO)
+- Comando "make": gera o video final completo (fundo, ASS, intro, logo) usando
+  um perfil:
+    python -m lyrics_aligner make cantado.mpeg letra.txt -o hino.mp4 --profile festa-ibuc
+  Opcoes uteis: --playback, --title-image, --logo, --background, --work,
+  --realign (forca novo alinhamento).
+- Antes de renderizar, o comando faz um "preflight" (QC) e grava qc.json na
+  pasta de trabalho. Ele avisa quando ha canto sem legenda e quando ha pausa
+  instrumental longa. O alinhamento e reaproveitado se o SRT ja existir.
+- O preenchimento da letra usa \kf (preenchimento suave) em vez de \k.
+- Para usar o CLI fora do aplicativo, defina:
+    set PYTHONPATH=C:\Users\globaltec\AppData\Local\VilmPipeline\app
+- Painel Tk: a secao "Video karaoke (lote)" permite adicionar varios hinos,
+  ver uma previa, ajustar intro/logo/fundo e gerar todos os videos. O painel
+  "Controle de qualidade" mostra os avisos de cada hino.
+
+COMPOSICAO DE CENA (IMAGENS E TEXTO)
+- Nova secao na interface Tk: "Composicao de cena (imagens e texto)".
+  Permite adicionar imagens e textos, arrastar na tela, redimensionar pelo
+  canto, ajustar entrada/saida na linha do tempo, fades, cor, fonte e posicao.
+  Botoes: Nova cena, Abrir/Salvar JSON, Desfazer/Refazer e Previa.
+- O formato cena.json e declarativo:
+    {"version":1,"width":1920,"height":1080,"layers":[
+      {"type":"image","file":"logo.png","x":1380,"y":80,"w":460,"h":460,
+       "start":0,"end":4,"fade_in":0.3,"fade_out":0.3},
+      {"type":"text","text":"Titulo","x":960,"y":800,"font_size":64,
+       "color":"#000000","start":0,"end":5,"fade":0.3}]}
+- O comando "make --scene cena.json" aplica as camadas sobre o video final.
+- A cena tambem e aplicada automaticamente ao lote do painel Tk.
+- Validacao: avisa arquivo ausente, camada fora da area segura e tempo
+  de saida anterior ao de entrada.
+- Botao "Efeitos…" (na cena, com uma camada de imagem selecionada):
+  remove fundo por cor, luminancia, saturacao ou flood-fill; ajusta brilho,
+  contraste, saturacao, nitidez, desfoque, opacidade, rotacao, espelhamento,
+  Preto e branco, sepia, tintura e sombra. Tudo processado localmente com
+  PIL/numpy/scipy, sem download de modelos.
+- Para fundo branco em logos coloridos, use "saturacao" com tolerancia ~0.1;
+  para fundo solido, use "cor" informando a cor; "flood" remove apenas a area
+  conectada as bordas.
+
+ACABAMENTOS DA INTERFACE TK (P1)
+- Snap/grid no Canvas de cena (marcador "Snap" e tamanho da grade).
+- Atalhos: Ctrl+S salva a cena, Ctrl+Z desfaz, Ctrl+Y refaz, Delete remove a
+  camada e Espaco mostra a previa (quando nao se esta digitando).
+- Autosave da cena em %LOCALAPPDATA%\LyricsAligner\scene-autosave.json,
+  restaurado ao abrir o programa.
+- Campo "Nome do arquivo" com o curinga {pasta} para personalizar a saida.
+- Botao "Adicionar pasta" inclui todas as midias de uma pasta no lote.
+- Historico por hino em history.csv dentro da pasta do projeto.
+- Os processos em segundo plano usam a instalacao correta do Vilm.
+
+FORMATOS, AREA SEGURA E TRANSICOES (P2)
+- Presets de resolucao no editor de cena: 1920x1080, 1280x720, 3840x2160,
+  1080x1920 (vertical) e 1080x1080. O video base e adaptado com barras.
+- Area segura: retangulo vermelho tracejado no Canvas. A validacao avisa
+  quando uma camada sai dessa area (margem configuravel em safe_margin).
+- Transicoes xfade entre intro / karaoke / logo, com acrossfade no audio.
+  No CLI: --transition fade (ou dissolve, wipeleft, slideright, smoothup)
+  e --transition-duration 0.4. No Tk: combo "Transicao" no lote.
+- As transicoes reduzem a duracao total em uma vez a duracao da transicao
+  entre cada par de segmentos.
+
+AUDIO AVANCADO (P3)
+- Comando CLI:
+    python -m lyrics_aligner audio entrada.wav -o saida.wav --mode instrumental
+    python -m lyrics_aligner audio entrada.wav -o saida.wav --mode mix --voice-gain 1.6
+  Modos: mix, instrumental (remove a voz), voice. Opcoes: --voice-gain,
+  --music-gain, --denoise (8 leve / 20 forte), --enhance voz|musica,
+  --normalize, --analyze (so mede duracao, codec, LUFS/pico).
+- Separacao voz/instrumental usa Demucs htdemucs (incluido, offline).
+- Reducao de ruido: ffmpeg afftdn. Melhoria: highpass + EQ + compressor +
+  loudnorm EBU R128 (-16 LUFS, -1.5 dBTP).
+- No make: --make-playback cria o playback instrumental com Demucs e ja
+  sincroniza as legendas para ele.
+- Painel Tk: secao "Audio" com Analisar, Extrair instrumental, Voz +/-,
+  Reduzir ruido e Normalizar/melhorar.
+
+DESINSTALAR
+- Menu Iniciar > Vilm Pipeline > Desinstalar
+  ou Configuracoes do Windows > Aplicativos > Vilm Pipeline > Desinstalar.

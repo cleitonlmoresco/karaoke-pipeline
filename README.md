@@ -14,8 +14,19 @@ Atribuição: Vilm Lyrics Aligner por banjuman/voiceandfilm (upstream MIT). Este
 ## O que este repo inclui
 
 - `scripts/gerar_video_padrao_santo.py` — geração de ASS/SRT/unidades e burn no padrão Santo (rolagem, 5 linhas, estilo configurável).
-- `docs/` — notas operacionais e patches aplicados no runtime Vilm 1.3.0.
+- `app/lyrics_aligner/` — módulos evoluídos do pipeline: perfis, alinhamento com regra 40/60, ASS com `\kf`, composição visual (`scene.json`), efeitos de imagem e áudio, CLI `make`/`audio`, painel Tk com QC e lote.
+- `profiles.json` — perfis pre-set (`festa-ibuc`, `festa-genesis`).
+- `docs/` — notas operacionais, patches do runtime Vilm 1.3.0, manual e guia de instalação dos módulos.
 - `templates/` — exemplos de configuração/tempos (sem mídia).
+
+## Módulos do pipeline (P0–P3)
+
+- **P0 — perfis + QC:** perfis aplicados por completo, preflight que detecta canto sem legenda e pausas instrumentais, ASS com preenchimento suave e rolagem com a linha atual no topo.
+- **P1 — editor:** Snap/grid, atalhos, autosave, histórico por hino, nomenclatura configurável e lote no painel Tk.
+- **P2 — formato:** presets de resolução (inclusive vertical), área segura e transições `xfade` entre intro/karaokê/logo.
+- **P3 — áudio:** separação Demucs (instrumental/voz), ganho independente da voz, redução de ruído e loudness EBU R128.
+
+Veja [`docs/INSTALACAO_E_MODULOS.md`](docs/INSTALACAO_E_MODULOS.md) para aplicar os módulos a uma instalação do Vilm Pipeline 1.3 e [`docs/LEIA-ME-Vilm.txt`](docs/LEIA-ME-Vilm.txt) para o manual completo.
 
 ## O que este repo NÃO inclui
 

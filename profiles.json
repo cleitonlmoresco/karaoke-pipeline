@@ -1,0 +1,87 @@
+{
+  "active": "festa-ibuc",
+  "profiles": {
+    "festa-ibuc": {
+      "name": "Festa do IBUC 2026",
+      "description": "Perfil usado nos hinos da Festa do IBUC (Canarana-MT). Letra preta sem borda, rolagem suave, imagem do titulo nos primeiros 4s e logo IBUC no final.",
+      "projects_root": "C:\\Users\\globaltec\\OneDrive\\Music\\FESTA IBUC\\PROJETOS",
+      "settings": {
+        "alignment": {
+          "mode": "auto", "language": "auto", "model": "small", "separate": true,
+          "max_chars": 30, "lead_ms": 600, "end_pad_ms": 500,
+          "min_duration_ms": 500, "max_duration_ms": 10000, "min_gap_ms": 80,
+          "offset_seconds": 0.0, "playback_offset_seconds": 0.0,
+          "range_start": 0.0, "range_end": null
+        },
+        "karaoke": {
+          "enabled": true,
+          "normal_color": "#000000", "active_color": "#000000",
+          "outline_color": "#000000", "back_color": "#00000000",
+          "font_name": "Arial", "font_size": 84, "active_font_size": 84,
+          "bold": true, "outline": 0.0, "shadow": 0.0, "alignment": 2,
+          "margin_h": 80, "margin_v": 280,
+          "lines_before": 0, "lines_after": 3, "lines_per_slide": 0,
+          "stanza_mode": "stanzas", "transition": "scroll",
+          "transition_ms": 600, "scroll_pause_seconds": 2.5
+        },
+        "background": {
+          "type": "image", "color": "#0B1D3A",
+          "image_filename": "FUNDO IBUC.png", "fit": "contain"
+        },
+        "output": {"width": 1920, "height": 1080},
+        "burn": {"preset": "medium", "crf": 18},
+        "demo": false
+      },
+      "extras": {
+        "intro_seconds": 4.0,
+        "intro_image": "imagem do titulo do hino na pasta do projeto (ex.: 2.png, 4.png, 6.png, WhatsApp Image...)",
+        "intro_audio": "aproveita os primeiros segundos da musica; a duracao total nao muda",
+        "outro_image": "LOGO IBUC.png na raiz da pasta de projetos",
+        "outro_image_file": "LOGO IBUC.png",
+        "outro_start": "apos a ultima letra + 1s",
+        "outro_min_seconds": 3.0,
+        "outro_end": "ate o fim da musica, com fade out de 1s",
+        "background_image": "FUNDO IBUC.png",
+        "timing_rule": "lead 600ms / end_pad 500ms; se o intervalo entre versos for menor que 1100ms, 40% vai para o fim do verso anterior e 60% para o inicio do proximo"
+      }
+    },
+    "festa-genesis": {
+      "name": "Festa do Genesis",
+      "description": "Perfil dos karaokes salvos em C:\\Users\\globaltec\\Downloads\\festa do genesis. Letra preta em Times New Roman, rolagem, fundo proprio de cada projeto.",
+      "projects_root": "C:\\Users\\globaltec\\Downloads\\festa do genesis",
+      "settings": {
+        "alignment": {
+          "mode": "auto", "language": "auto", "model": "small", "separate": true,
+          "max_chars": 50, "lead_ms": 600, "end_pad_ms": 500,
+          "min_duration_ms": 500, "max_duration_ms": 10000, "min_gap_ms": 80,
+          "offset_seconds": 0.0, "playback_offset_seconds": 0.0,
+          "range_start": 0.0, "range_end": null
+        },
+        "karaoke": {
+          "enabled": true,
+          "normal_color": "#000000", "active_color": "#000000",
+          "outline_color": "#000000", "back_color": "#00000080",
+          "font_name": "Times New Roman", "font_size": 85, "active_font_size": 90,
+          "bold": true, "outline": 0.0, "shadow": 1.0, "alignment": 5,
+          "margin_h": 40, "margin_v": 40,
+          "lines_before": 0, "lines_after": 4, "lines_per_slide": 0,
+          "stanza_mode": "time", "transition": "scroll",
+          "transition_ms": 400, "scroll_pause_seconds": 3.0
+        },
+        "background": {
+          "type": "image", "color": "#66000a",
+          "image_filename": "fundo.jpeg", "fit": "contain"
+        },
+        "output": {"width": 1920, "height": 1080},
+        "burn": {"preset": "medium", "crf": 18},
+        "demo": false
+      },
+      "extras": {
+        "intro_seconds": 0,
+        "outro_image": null,
+        "background_image": "fundo.jpeg (na pasta fundo de cada projeto)",
+        "timing_rule": "lead 600ms / end_pad 500ms; se o intervalo entre versos for menor que 1100ms, 40% vai para o fim do verso anterior e 60% para o inicio do proximo"
+      }
+    }
+  }
+}
