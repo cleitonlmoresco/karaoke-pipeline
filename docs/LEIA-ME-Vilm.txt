@@ -71,5 +71,7 @@ LIMITES HONESTOS
 - A previa de Producao usa frases fixas de exemplo; a previa de Cena
   mostra o texto das camadas.
 - Nao ha testes automaticos da interface.
-- webapp/VilmPipeline.exe sao legado, em remocao paralela sem garantia.
+- webapp.py removido do pacote e do repositorio em 27/11/2026; codigo
+  arquivado em _legado na instalacao local; VilmPipeline.exe permanece
+  como legado fora do fluxo.
 - Nao ha afirmacao de commit/push nem de funcionamento 100% validado em GUI.

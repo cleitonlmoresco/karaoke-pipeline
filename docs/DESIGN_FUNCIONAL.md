@@ -127,5 +127,6 @@ registrados no `history.csv`; a renderização segue em frente.
    sintaxe/importação e conferência manual com arquivos reais.
 4. A instalação mantém uma cópia antiga em `python\Lib\site-packages`;
    sem `PYTHONPATH=app`, o comportamento pode ser o da versão legada.
-5. O `webapp.py` e `VilmPipeline.exe` são legado, em processo de remoção
-   paralela; nenhuma afirmação de remoção completa é feita aqui.
+5. `webapp.py` removido do pacote e do repositório em 27/11/2026; código
+   arquivado em `_legado` na instalação local; `VilmPipeline.exe` permanece
+   como legado fora do fluxo.

@@ -129,9 +129,9 @@ python -m lyrics_aligner audio "hino.wav" -o "hino - instrumental.wav" --mode in
 
 ## 7. Legado e estado da instalação
 
-- `webapp.py` (Flask) e `VilmPipeline.exe` são **legado**, fora do fluxo atual.
-  A remoção está sendo feita em paralelo; não há garantia de que já tenha
-  terminado nesta etapa.
+- `webapp.py` foi removido do pacote e do repo; `VilmPipeline.exe` é legado
+  fora do fluxo. Código arquivado em `_legado` na instalação local
+  (removido em 27/11/2026).
 - `python\Lib\site-packages\lyrics_aligner\` é a cópia antiga; alguns
   executáveis de `python\Scripts\` apontam para ela.
 - Não há **nenhum teste automático** (`test_*.py`) em `app\`. A validação

@@ -25,7 +25,7 @@
 | Serviços | alinhamento único, karaoke, cena, áudio e efeitos | `services/align → generate_alignment`, `karaoke_jobs → run_project`, `scene → render_preview`, `audiofx → apply_audio_fx`, `imagefx → process_image` |
 | Cena | prévia mostra texto; autosave por projeto | `scene.py → render_preview`; `tk_scene_tab → _scene_autosave_path, _scene_preview` |
 | Produção | prévia ainda usa frases fixas; QC AVISA, NAO BLOQUEIA | `tk_production_tab → _update_preview, _append_qc`; `karaoke_jobs → qc_report` |
-| Webapp | legado, em processo de remoção paralela (F4-I2), sem garantia nesta etapa | `webapp.py`, `VilmPipeline.exe` continuam no disco |
+| Webapp | `webapp.py` removido do pacote e do repositório em 27/11/2026; código arquivado em `_legado` na instalação local; `VilmPipeline.exe` permanece como legado fora do fluxo | `git ls-files` sem `webapp.py`; `VilmPipeline.exe` fora do fluxo |
 | Testes | nenhum teste automático; GUI não validada por suíte | ausência de `test_*.py` em `app\` |
 
 ### Metas antigas concluídas em 27/11/2026
@@ -42,15 +42,14 @@
 - **Concluído em 27/11/2026:** documentação reescrita/criada
   (`LEIA-ME.txt`, `DESIGN_FUNCIONAL.md`, `INSTALACAO_E_MODULOS.md`,
   `LEIA-ME-Vilm.txt`) e erratas nos relatórios históricos.
-- **Não concluído / sem prova:** commit e push; remoção completa do webapp;
-  suíte de testes automáticos.
+- **Não concluído / sem prova:** commit e push; suíte de testes automáticos.
 
 ### Limitações que continuam abertas
 
 A prévia de Produção usa frases fixas; a prévia de Cena mostra texto.
 O QC **AVISA, NAO BLOQUEIA**. Não se afirma que o instalador preserva
 projetos: não há prova para essa afirmação. Não se afirma "100% funcional"
-sem execução de GUI. `webapp em processo de remoção/legado`, sem garantia.
+sem execução de GUI. `webapp.py` removido do pacote e do repositório em 27/11/2026; código arquivado em `_legado` na instalação local; `VilmPipeline.exe` permanece como legado fora do fluxo.
 
 ---
 
@@ -166,8 +165,8 @@ sem execução de GUI. `webapp em processo de remoção/legado`, sem garantia.
 | **Para que serve** | Um produto, uma interface, um lançador — eliminar o "dois programas" que confunde. |
 | **Função** | Nenhuma nova: **mover** o que é usado e apagar o resto. |
 | **Configuração** | `webapp-config.json` migra para `settings` (é só `projects_root`). |
-| **Hoje** | `tkinter_app.py → VilmTkApp._build_menu` não expõe mais "Abrir interface web"; `settings.py → migrate_legacy_settings` absorve os arquivos antigos. `webapp.py`/`VilmPipeline.exe` são legado, em processo de remoção paralela (F4-I2), sem garantia nesta etapa. |
-| **Como aplicar** | `DEFAULT_SETTINGS` → `settings.py`; `probe_media` → `media.py`; remover o menu e `_open_webapp`; `webapp.py` fica como arquivo legado (ou sai da instalação); `vilm-webapp.exe` descontinuado. **Antes de apagar:** portar a lista de projetos que o webapp tinha (A4 / tela C2). |
+| **Hoje** | `tkinter_app.py → VilmTkApp._build_menu` não expõe mais "Abrir interface web"; `settings.py → migrate_legacy_settings` absorve os arquivos antigos. `webapp.py` removido do pacote e do repositório em 27/11/2026; código arquivado em `_legado` na instalação local; `VilmPipeline.exe` permanece como legado fora do fluxo. |
+| **Como aplicar** | `DEFAULT_SETTINGS` → `settings.py`; `probe_media` → `media.py`; remover o menu e `_open_webapp`; `webapp.py` removido do pacote e do repositório em 27/11/2026; código arquivado em `_legado` na instalação local; `VilmPipeline.exe` permanece como legado fora do fluxo; `vilm-webapp.exe` descontinuado. |
 
 ---
 
@@ -445,7 +444,7 @@ inspect_ass, compare_versions, cross_check, diff_timelines, verify_frames`
 - [x] Concluído em 27/11/2026: copiar os **11 módulos** que faltam em `app\` → Assistente, realign, burn, staging, export voltam a funcionar
 - [x] Concluído em 27/11/2026: idioma não apaga perfil (`tkinter_app.py → VilmTkApp.apply_language`; `profiles_api → set_active_profile`)
 - [ ] Remover `.bak`, `__pycache__`, `runtime_setup`/`resolve_bridge`/`cleanup`
-- [x] Concluído em 27/11/2026: menu "Abrir interface web" removido (`tkinter_app.py → VilmTkApp._build_menu`); `webapp` permanece como legado em remoção paralela
+- [x] Concluído em 27/11/2026: menu "Abrir interface web" removido (`tkinter_app.py → VilmTkApp._build_menu`); `webapp.py` removido do pacote e do repositório em 27/11/2026; código arquivado em `_legado` na instalação local; `VilmPipeline.exe` permanece como legado fora do fluxo
 - **Saída:** nenhum botão estoura erro.
 
 ### Fase 1 · Fundação (camada de dados)
@@ -503,7 +502,7 @@ inspect_ass, compare_versions, cross_check, diff_timelines, verify_frames`
 **Riscos:**
 | Risco | Mitigação |
 |---|---|
-| Portar `DEFAULT_SETTINGS` do webapp quebra a aba Configurações | Copiar e **comparar** antes de apagar a importação; manter `webapp.py` legado até a Fase 4 |
+| Portar `DEFAULT_SETTINGS` do webapp quebra a aba Configurações | Copiar e **comparar** antes de apagar a importação; `webapp.py` removido do pacote e do repositório em 27/11/2026; código arquivado em `_legado` na instalação local; `VilmPipeline.exe` permanece como legado fora do fluxo |
 | Dividir `desktop.py` quebra atalhos/autosave | Mover método a método com o programa aberto a cada passo; `DesktopApp(embedded=True)` mantido só como casca durante a transição |
 | Reinstalar os `.exe` perde o perfil ativo | `settings` já migrado para `config.json` **antes** da reinstalação |
 | `ko` incompleto | `t()` cai para `pt`; nada quebra, só aparece texto em PT até completar |
