@@ -60,6 +60,12 @@ def validate_scene(scene: dict) -> list[str]:
     sx1, sy1, sx2, sy2 = safe_bounds(scene)
     for index, layer in enumerate(scene.get("layers", []), 1):
         kind = layer.get("type", "image")
+        if "type" not in layer:
+            warnings.append(f"Camada {index}: tipo (type) ausente; assumido 'image'.")
+        elif kind not in ("image", "text"):
+            warnings.append(
+                f"Camada {index}: tipo (type) desconhecido '{kind}'; use 'image' ou 'text'."
+            )
         start = float(layer.get("start", 0)); end = layer.get("end")
         if end is not None and float(end) <= start:
             warnings.append(f"Camada {index}: fim ({end}) anterior ao inicio ({start}).")
@@ -80,8 +86,13 @@ def validate_scene(scene: dict) -> list[str]:
     return warnings
 
 
-def _ass_for_text_layers(layers: list[dict], width: int, height: int) -> str:
-    r"""Gera ASS com \pos, \fad e estilo por camada de texto."""
+def _ass_for_text_layers(layers: list[dict], width: int, height: int,
+                         time_offset: float = 0.0) -> str:
+    r"""Gera ASS com \pos, \fad e estilo por camada de texto.
+
+    ``time_offset`` e opcional e desloca entradas/saidas sem alterar a chamada
+    feita por :func:`compile_scene`.
+    """
     header = (
         "[Script Info]\nTitle: Vilm Scene\nScriptType: v4.00+\n"
         f"PlayResX: {width}\nPlayResY: {height}\n"
@@ -107,8 +118,10 @@ def _ass_for_text_layers(layers: list[dict], width: int, height: int) -> str:
             f"{color},&H00000000&,&H00000000&,{bold},0,0,0,100,100,0,0,1,"
             f"{outline},0,5,0,0,0,1\n"
         )
-        start = float(layer.get("start", 0))
-        end = float(layer.get("end") or (start + 5.0))
+        start_raw = float(layer.get("start", 0))
+        end_raw = float(layer.get("end") or (start_raw + 5.0))
+        start = start_raw + time_offset
+        end = end_raw + time_offset
         fade = float(layer.get("fade", 0.3))
         fade_tag = f"{{\\fad({int(fade * 1000)},{int(fade * 1000)})}}" if fade else ""
         x = float(layer.get("x", width / 2)); y = float(layer.get("y", height / 2))
@@ -176,8 +189,11 @@ def compile_scene(*, scene: dict, video: Path, output: Path, work: Path) -> Path
             needs_fx = needs_fx or any(fx.get(k) for k in (
                 "grayscale", "sepia", "tint", "flip_h", "flip_v", "shadow"))
         if needs_fx:
-            from .imagefx import process_image
-            image_path = process_image(image_path, work / f"fx_{index}.png", fx)
+            from .imagefx import cached_process_image
+            image_path = cached_process_image(
+                image_path, work / f"fx_{index}.png", fx,
+                cache_dir=(work / ".fx-cache").resolve(),
+            )
         command += ["-loop", "1", "-framerate", "1", "-t", f"{end:.3f}",
                     "-i", str(image_path)]
         label = f"[img{index}]"
@@ -235,14 +251,36 @@ def compile_scene(*, scene: dict, video: Path, output: Path, work: Path) -> Path
 
 def render_preview(*, scene: dict, background: Path | None, time: float,
                    output: Path, width: int = 640, height: int = 360) -> Path:
-    """Renderiza um unico frame da cena para previa rapida no editor."""
+    """Renderiza um unico frame da cena para previa rapida no editor.
+
+    As dimensoes vem de ``scene['width']``/``scene['height']`` e o maior lado
+    fica limitado a 640 pixels, preservando a proporcao do formato (vertical,
+    quadrado ou horizontal).
+    """
+    output = Path(output).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
-    command = [str(FFMPEG), "-y", "-loglevel", "error", "-ss", f"{max(0.0, time):.3f}"]
+    scene_w = max(1, int(scene.get("width", 1920)))
+    scene_h = max(1, int(scene.get("height", 1080)))
+    limit = max(1, min(640, max(int(width), int(height))))
+    if scene_w >= scene_h:
+        preview_w = min(scene_w, limit)
+        preview_h = scene_h * preview_w / scene_w
+    else:
+        preview_h = min(scene_h, limit)
+        preview_w = scene_w * preview_h / scene_h
+    width = max(2, int(round(preview_w / 2) * 2))
+    height = max(2, int(round(preview_h / 2) * 2))
+
+    seek = max(0.0, time)
+    command = [str(FFMPEG), "-y", "-loglevel", "error", "-ss", f"{seek:.3f}"]
     if background and Path(background).is_file():
         command += ["-i", str(background)]
         base = "[0:v:0]"
     else:
-        command += ["-f", "lavfi", "-i", f"color=c=0xFFF3E8:s={width}x{height}:r=30:d=1"]
+        # Duracao extra garante um frame apos o seek quando nao ha video base.
+        duration = max(1.0, seek + 1.0)
+        command += ["-f", "lavfi", "-i",
+                    f"color=c=0xFFF3E8:s={width}x{height}:r=30:d={duration:.3f}"]
         base = "[0:v]"
     filters = [f"{base}scale={width}:{height}:force_original_aspect_ratio=decrease,"
                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=0xFFF3E8,setsar=1[base]"]
@@ -251,26 +289,51 @@ def render_preview(*, scene: dict, background: Path | None, time: float,
         if layer.get("type") != "image" or not Path(str(layer.get("file") or "")).is_file():
             continue
         start = float(layer.get("start", 0)); end = float(layer.get("end") or start + 5)
-        if not (start <= time <= end):
+        if not (start <= seek <= end):
             continue
         image_path = Path(str(layer["file"]))
         fx = layer.get("fx")
         if isinstance(fx, dict) and fx:
-            from .imagefx import process_image
-            image_path = process_image(image_path, Path(output).parent / f"preview_fx_{index}.png", fx)
+            from .imagefx import cached_process_image
+            image_path = cached_process_image(
+                image_path, output.parent / f"preview_fx_{index}.png", fx,
+                cache_dir=output.parent / ".fx-cache",
+            )
         command += ["-i", str(image_path)]
-        scene_w = int(scene.get("width", 1920)); scene_h = int(scene.get("height", 1080))
         w = max(1, int(float(layer.get("w", scene_w)) * width / scene_w))
         h = max(1, int(float(layer.get("h", scene_h)) * height / scene_h))
         x = int(float(layer.get("x", 0)) * width / scene_w)
         y = int(float(layer.get("y", 0)) * height / scene_h)
         filters.append(f"[{inputs}:v]scale={w}:{h},format=rgba[i{index}]")
-        filters.append(f"{last}[i{index}]overlay={x}:{y}:format=auto[m{index}]")
+        # O -ss reinicia os timestamps em zero; o enable usa tempo relativo.
+        filters.append(
+            f"{last}[i{index}]overlay={x}:{y}:"
+            f"enable='between(t,{max(0.0, start - seek):.3f},{max(0.0, end - seek):.3f})':"
+            f"format=auto[m{index}]"
+        )
         last = f"[m{index}]"; inputs += 1
+
+    text_layers = [
+        layer for layer in scene.get("layers", [])
+        if layer.get("type") == "text" and str(layer.get("text", "")).strip()
+    ]
+    if text_layers:
+        ass_path = output.parent / "preview_scene_text.ass"
+        # O frame unico vem com PTS=0 apos o seek: um \fad o deixaria
+        # totalmente transparente. Na previa estatica o texto fica opaco.
+        preview_layers = [{**layer, "fade": 0} for layer in text_layers]
+        ass_path.write_text(
+            _ass_for_text_layers(preview_layers, scene_w, scene_h, time_offset=-seek),
+            encoding="utf-8",
+        )
+        # O ASS entra depois dos overlays e antes do scale final.
+        filters.append(f"{last}ass={ass_path.name}[txt]")
+        last = "[txt]"
+
     filters.append(f"{last}scale={width}:{height}[out]")
     command += ["-filter_complex", ";".join(filters), "-map", "[out]",
                 "-frames:v", "1", str(output)]
-    _run(command)
+    _run(command, cwd=output.parent)
     return output
 
 

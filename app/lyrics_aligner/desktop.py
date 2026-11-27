@@ -10,163 +10,161 @@ import tempfile
 import threading
 from datetime import datetime
 from pathlib import Path
-from tkinter import (BOTH, END, LEFT, RIGHT, X, Y, BooleanVar, Canvas, Checkbutton,
-                     DoubleVar, IntVar, Listbox, Scale, StringVar, Text, Tk, Toplevel,
-                     filedialog, messagebox)
+from tkinter import (BOTH, END, LEFT, RIGHT, X, Y, Canvas, Listbox, StringVar,
+                     Text, Tk, filedialog, messagebox)
 from tkinter import ttk
 
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
-from .karaoke_jobs import load_profiles
+from . import profiles_api, settings
 from .media import waveform_peaks
 from .platform_paths import application_data_root
-from .process_runner import JobCancelled, run_streaming_process
+from .process_runner import JobCancelled, console_python, run_job
+from .project import update_project_meta
+from .services.align import generate_alignment
+from .i18n import (
+    available_languages,
+    language_label,
+    mark as mark_widget,
+    on_language_changed,
+    retranslate,
+    set_language,
+    t,
+)
 
 
 APP_NAME = "Vilm Lyrics Aligner"
 APP_DIR = application_data_root()
+# Caminhos legados mantidos apenas para compatibilidade de importacao; a
+# leitura/gravacao de preferencias passa pelo modulo ``settings``.
 CONFIG_PATH = APP_DIR / "config.json"
 PREFERENCES_PATH = APP_DIR / "desktop-preferences.json"
 VILM_APP_PATH = Path(__file__).resolve().parents[2] / "app"
 AUTOSAVE_PATH = APP_DIR / "scene-autosave.json"
 
-TEXT = {
-    "en": {
-        "profile": "Karaoke profile (pre-set)",
-        "profile_help": "Choosing a profile applies its timing and style settings to new subtitles.",
-        "media": "1. Media",
-        "drop": "Choose the video or audio that matches the edit where subtitles will be used.",
-        "browse": "Choose media…",
-        "no_media": "No media selected",
-        "range": "2. Processing range",
-        "full": "Full file",
-        "selection": "Selected waveform range",
-        "range_help": "For a long file, drag across the waveform. Only the selected range is processed.",
-        "lyrics": "3. Original lyrics",
-        "lyrics_hint": "Paste the full lyrics. Vilm will locate the lines heard in a selected range.",
-        "load": "Load TXT…",
-        "mode": "4. Subtitle style",
-        "auto": "Auto mode (recommended)",
-        "manual": "Manual (advanced)",
-        "max_chars": "Max characters",
-        "max_duration": "Max duration (sec)",
-        "end_hold": "End hold",
-        "device": "Processing device",
-        "generate": "Generate SRT",
-        "cancel": "Cancel",
-        "ready": "Ready",
-        "loading": "Reading media and drawing waveform…",
-        "processing": "Processing locally. Full songs can take several minutes.",
-        "done": "SRT created successfully.",
-        "open_folder": "Open output folder",
-        "need_media": "Choose a media file first.",
-        "need_lyrics": "Paste the original lyrics first.",
-        "bad_range": "Select a range of at least one second.",
-        "save_title": "Save subtitle file",
-        "file_error": "Could not read this media file",
-        "failed": "Generation failed",
-        "cancelled": "Cancelled",
-        "guide": "Complex edited timeline? Use the NLE integration when available. Otherwise export a lightweight full-timeline reference audio file, then select only the needed range here.",
-    },
-    "ko": {
-        "profile": "카라오케 프로필 (프리셋)",
-        "profile_help": "프로필을 선택하면 새 자막에 해당 타이밍·스타일 설정이 적용됩니다.",
-        "media": "1. 미디어",
-        "drop": "자막을 사용할 편집본과 오디오 타이밍이 같은 영상 또는 음원을 선택하세요.",
-        "browse": "영상·음원 선택…",
-        "no_media": "선택한 미디어 없음",
-        "range": "2. 처리 범위",
-        "full": "전체 파일",
-        "selection": "파형에서 선택한 구간",
-        "range_help": "긴 파일은 파형을 드래그하세요. 선택한 구간만 AI가 처리합니다.",
-        "lyrics": "3. 원문 가사",
-        "lyrics_hint": "전체 가사를 붙여넣으세요. 선택 구간에서 들리는 줄은 Vilm이 찾습니다.",
-        "load": "가사 TXT 불러오기…",
-        "mode": "4. 자막 구성",
-        "auto": "자동 모드 (권장)",
-        "manual": "수동(고급) 모드",
-        "max_chars": "최대 글자 수",
-        "max_duration": "최대 표시(초)",
-        "end_hold": "끝 여운",
-        "device": "처리 장치",
-        "generate": "SRT 생성",
-        "cancel": "취소",
-        "ready": "대기 중",
-        "loading": "미디어를 읽고 파형을 만드는 중…",
-        "processing": "로컬에서 처리 중입니다. 한 곡은 몇 분 걸릴 수 있습니다.",
-        "done": "SRT를 생성했습니다.",
-        "open_folder": "출력 폴더 열기",
-        "need_media": "먼저 영상 또는 음원을 선택해 주세요.",
-        "need_lyrics": "먼저 원문 가사를 붙여넣어 주세요.",
-        "bad_range": "1초 이상의 구간을 선택해 주세요.",
-        "save_title": "자막 파일 저장",
-        "file_error": "미디어 파일을 읽지 못했습니다",
-        "failed": "생성 실패",
-        "cancelled": "취소됨",
-        "guide": "복잡하게 편집된 타임라인은 가능하면 NLE 연동을 사용하세요. 연동할 수 없다면 가벼운 전체 타임라인 참고용 오디오를 출력한 뒤 필요한 구간만 여기서 선택하세요.",
-    },
-}
+
+def _job_python() -> str:
+    """Compatibilidade: o interprete do job de audio vive no modulo de audio."""
+    from .tk_audio_tab import _job_python as _module_job_python
+    return _module_job_python()
 
 
-def _load_json(path: Path) -> dict:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+def _production_module():
+    """Importa o modulo de producao sem exigir uma instancia da aba."""
+    from . import tk_production_tab as _module
+    return _module
 
 
 def _format_time(seconds: float) -> str:
-    seconds = max(0.0, float(seconds))
-    minutes, remainder = divmod(seconds, 60.0)
-    hours, minutes = divmod(int(minutes), 60)
-    if hours:
-        return f"{hours:02d}:{minutes:02d}:{remainder:05.2f}"
-    return f"{minutes:02d}:{remainder:05.2f}"
+    """Compatibilidade: o formatador vive no modulo de producao."""
+    return _production_module()._format_time(seconds)
+
+
+def _find_project_root(path: str | Path | None) -> Path | None:
+    """Suba pelos pais de ``path`` ate encontrar um ``projeto.json``.
+
+    Nada e escrito: a funcao apenas localiza a raiz de um projeto existente.
+    Quando nao ha projeto, retorna ``None`` e os chamadores usam o comportamento
+    legado (ao lado da midia).
+    """
+    if path is None:
+        return None
+    candidate = Path(path).expanduser()
+    try:
+        candidate = candidate.resolve()
+    except OSError:
+        candidate = candidate.absolute()
+    if candidate.is_file():
+        candidate = candidate.parent
+    for _ in range(12):
+        if (candidate / "projeto.json").is_file():
+            return candidate
+        parent = candidate.parent
+        if parent == candidate:
+            break
+        candidate = parent
+    return None
+
+
+def _audio_defaults() -> dict[str, object]:
+    """Compatibilidade: os defaults de audio vivem no modulo de audio."""
+    from .tk_audio_tab import _audio_defaults as _module_defaults
+    return _module_defaults()
+
+
+def _result_value(result, key: str, default=None):
+    """Compatibilidade: o leitor de resultado vive no modulo de producao."""
+    return _production_module()._result_value(result, key, default)
 
 
 class DesktopApp:
-    def __init__(self, root: Tk) -> None:
+    def __init__(self, root: Tk, parent=None, embedded: bool = False) -> None:
         self.root = root
-        self.preferences = _load_json(PREFERENCES_PATH)
-        self.language = self.preferences.get("ui_language", "en")
-        if self.language not in TEXT:
-            self.language = "en"
-        self.config = _load_json(CONFIG_PATH)
-        self.backend = str(self.config.get("backend", "cpu")).casefold()
-        self.media_path: Path | None = None
-        self.duration = 0.0
-        self.peaks: list[float] = []
-        self.range_start = 0.0
-        self.range_end = 0.0
-        self.drag_start_x: float | None = None
-        self.worker: threading.Thread | None = None
-        self.cancel_event = threading.Event()
+        self.parent = parent if parent is not None else root
+        self.embedded = embedded
+        # ``settings_path`` permite isolar testes; por padrao o destino e o
+        # settings.json resolvido por lyrics_aligner.settings.
+        self.settings_path: str | Path | None = None
+        self.preferences = settings.load_settings(self._settings_target())
+        self.language = str(self.preferences.get("ui_language") or "pt")
+        if self.language not in available_languages():
+            self.language = "pt"
+        set_language(self.language)
+        self.config = self.preferences
+        self.backend = str(self.config.get("backend") or "cpu").casefold()
+        # Producao: estado e widgets vivem em tk_production_tab.ProductionTab,
+        # criado em _build(); as propriedades abaixo apenas o expoem.
+        self.production_tab = None
+        # audio_worker / audio_cancel_event vivem em tk_audio_tab.AudioTab e
+        # sao expostos aqui por propriedades somente-leitura (ver fachada).
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
-        self.last_output: Path | None = None
-        self.profiles = load_profiles()
+        self.profiles = profiles_api.load_profiles()
+        # Caminho opcional de profiles.json, desviavel em testes isolados.
+        self.profiles_path: str | Path | None = None
         self.active_profile = str(
             self.preferences.get("profile") or self.profiles.get("active") or ""
         )
-        self.lead_ms = 600
+        # Cena: estado e widgets vivem em tk_scene_tab.SceneTab, criado em
+        # _build(); as propriedades abaixo apenas o expoem pela fachada.
+        self.scene_tab = None
 
-        root.title(APP_NAME)
-        root.geometry("860x720")
-        root.minsize(720, 620)
+        if not embedded:
+            root.title(APP_NAME)
+            root.geometry("1100x760")
+            root.minsize(900, 640)
         self._configure_style()
         self._build()
         self._apply_language()
+        # Re-apply the Karaoke tab labels after every retranslation, without
+        # touching the language itself or persisting anything here.
+        on_language_changed(self._apply_language)
         self._setup_shortcuts()
         root.after(100, self._poll_events)
-
-    def tr(self, key: str) -> str:
-        return TEXT[self.language][key]
 
     def _typing(self) -> bool:
         widget = self.root.focus_get()
         return widget is not None and widget.winfo_class() in {
             "Text", "Entry", "TEntry", "Spinbox", "TSpinbox", "Combobox", "TCombobox"
         }
+
+    def _settings_target(self) -> str | Path | None:
+        """Destino opcional do settings.json (uso em testes isolados)."""
+        if self.settings_path is not None:
+            return self.settings_path
+        return os.environ.get("LYRICS_ALIGNER_SETTINGS_PATH") or None
+
+    def _save_preferences(self, **updates) -> None:
+        """Wrapper fino sobre settings.update_settings (gravacao mesclada).
+
+        Mantem o dict em memoria sincronizado para que trocar o idioma nao
+        apague o perfil (e vice-versa). Nenhum arquivo legado e reescrito.
+        """
+        try:
+            self.preferences = settings.update_settings(
+                updates, self._settings_target()
+            )
+        except OSError:
+            self.preferences.update(updates)
 
     def _setup_shortcuts(self) -> None:
         """Atalhos no estilo de estacoes de edicao (Space, Delete, Ctrl+S/Z/Y)."""
@@ -176,77 +174,307 @@ class DesktopApp:
         self.root.bind_all("<Delete>", lambda _e: None if self._typing() else self._scene_remove())
         self.root.bind_all("<space>", lambda _e: None if self._typing() else self._scene_preview())
 
-    # ---- ferramentas de audio ------------------------------------------
+    # ---- fachada da producao (tk_production_tab.ProductionTab) ----------
+    # O modulo e dono do estado e dos widgets; aqui so ha acesso
+    # somente-leitura/escrita para manter as assinaturas da casca existente.
+    @property
+    def media_path(self) -> Path | None:
+        return self.production_tab.media_path if self.production_tab is not None else None
+
+    @media_path.setter
+    def media_path(self, value) -> None:
+        if self.production_tab is not None:
+            self.production_tab.media_path = value
+
+    @property
+    def duration(self) -> float:
+        return self.production_tab.duration if self.production_tab is not None else 0.0
+
+    @duration.setter
+    def duration(self, value: float) -> None:
+        if self.production_tab is not None:
+            self.production_tab.duration = value
+
+    @property
+    def peaks(self) -> list[float]:
+        return self.production_tab.peaks if self.production_tab is not None else []
+
+    @peaks.setter
+    def peaks(self, value: list[float]) -> None:
+        if self.production_tab is not None:
+            self.production_tab.peaks = value
+
+    @property
+    def range_start(self) -> float:
+        return self.production_tab.range_start if self.production_tab is not None else 0.0
+
+    @range_start.setter
+    def range_start(self, value: float) -> None:
+        if self.production_tab is not None:
+            self.production_tab.range_start = value
+
+    @property
+    def range_end(self) -> float:
+        return self.production_tab.range_end if self.production_tab is not None else 0.0
+
+    @range_end.setter
+    def range_end(self, value: float) -> None:
+        if self.production_tab is not None:
+            self.production_tab.range_end = value
+
+    @property
+    def drag_start_x(self) -> float | None:
+        return self.production_tab.drag_start_x if self.production_tab is not None else None
+
+    @drag_start_x.setter
+    def drag_start_x(self, value) -> None:
+        if self.production_tab is not None:
+            self.production_tab.drag_start_x = value
+
+    @property
+    def worker(self) -> threading.Thread | None:
+        return self.production_tab.worker if self.production_tab is not None else None
+
+    @worker.setter
+    def worker(self, value) -> None:
+        if self.production_tab is not None:
+            self.production_tab.worker = value
+
+    @property
+    def cancel_event(self) -> threading.Event | None:
+        return self.production_tab.cancel_event if self.production_tab is not None else None
+
+    @cancel_event.setter
+    def cancel_event(self, value) -> None:
+        if self.production_tab is not None:
+            self.production_tab.cancel_event = value
+
+    @property
+    def last_output(self) -> Path | None:
+        return self.production_tab.last_output if self.production_tab is not None else None
+
+    @last_output.setter
+    def last_output(self, value) -> None:
+        if self.production_tab is not None:
+            self.production_tab.last_output = value
+
+    @property
+    def lead_ms(self) -> int:
+        return self.production_tab.lead_ms if self.production_tab is not None else 600
+
+    @lead_ms.setter
+    def lead_ms(self, value: int) -> None:
+        if self.production_tab is not None:
+            self.production_tab.lead_ms = value
+
+    @property
+    def last_warnings(self) -> list[str]:
+        return self.production_tab.last_warnings if self.production_tab is not None else []
+
+    @last_warnings.setter
+    def last_warnings(self, value: list[str]) -> None:
+        if self.production_tab is not None:
+            self.production_tab.last_warnings = value
+
+    def set_active_profile(self, name: str) -> str:
+        """Dono unico da ativacao: profiles.json.active + settings.profile."""
+        profiles_path = getattr(self, "profiles_path", None)
+        settings_path = self._settings_target()
+        result = profiles_api.set_active_profile(
+            name, profiles_path=profiles_path, settings_path=settings_path
+        )
+        self.profiles = profiles_api.load_profiles(profiles_path)
+        self.active_profile = name
+        self.preferences["profile"] = name
+        return result
+
+    def open_folder(self, folder: str) -> None:
+        """Abre uma pasta no explorador; implementacao platform-specific."""
+        if os.name == "nt":
+            os.startfile(folder)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", folder])
+        else:
+            subprocess.Popen(["xdg-open", folder])
+
+    def __getattr__(self, name: str):
+        """Compatibilidade: atributos de widget dos modos agora nos modulos.
+
+        As propriedades acima cobrem o estado; este fallback cobre os widgets
+        (``status``, ``batch_list``, ``profile_box``, ...) que a casca antiga
+        expunha diretamente, sem duplicar nenhum widget na fachada.
+        """
+        for tab_name in ("production_tab", "audio_tab", "scene_tab"):
+            tab = self.__dict__.get(tab_name)
+            if tab is not None:
+                try:
+                    return getattr(tab, name)
+                except AttributeError:
+                    pass
+        raise AttributeError(name)
+
+    # ---- fachada para os modulos --------------------------------------
+    # Os tab modules nao acessam widgets alheios: estes wrappers finos sao a
+    # unica ponte entre eles e o estado desta aba.
+    def set_status(self, text: str) -> None:
+        self.production_tab.status.configure(text=text)
+
+    def emit(self, kind: str, payload=None) -> None:
+        self.events.put((kind, payload))
+
+    def selected_batch_item(self) -> str | None:
+        return self.production_tab.selected_batch_item()
+
+    def project_root_for(self, path: str | Path | None = None) -> Path | None:
+        return self._project_root_for(path)
+
+    # ---- fachada da cena (tk_scene_tab.SceneTab) -------------------------
+    # O modulo de cena e dono do estado e dos widgets; aqui so ha acesso
+    # somente-leitura/escrita e snapshots para o lote.
+    @property
+    def scene(self) -> dict:
+        return self.scene_tab.scene
+
+    @scene.setter
+    def scene(self, value: dict) -> None:
+        self.scene_tab.scene = value
+
+    @property
+    def scene_project_dir(self) -> Path | None:
+        return self.scene_tab.scene_project_dir
+
+    @scene_project_dir.setter
+    def scene_project_dir(self, value: Path | None) -> None:
+        self.scene_tab.scene_project_dir = value
+
+    @property
+    def _scene_ready(self) -> bool:
+        return self.scene_tab._scene_ready
+
+    @_scene_ready.setter
+    def _scene_ready(self, value: bool) -> None:
+        self.scene_tab._scene_ready = value
+
+    @property
+    def scene_history(self) -> list[dict]:
+        return self.scene_tab.scene_history
+
+    @property
+    def scene_future(self) -> list[dict]:
+        return self.scene_tab.scene_future
+
+    def scene_snapshot(self) -> dict:
+        """Copia imutavel da cena para o snapshot do lote (thread principal)."""
+        return copy.deepcopy(self.scene_tab.scene)
+
+    def scene_autosave_path(self) -> Path:
+        """Caminho global de autosave (desviavel em testes headless)."""
+        return AUTOSAVE_PATH
+
+    def background_image(self) -> Path | None:
+        """Imagem de fundo escolhida no lote, sem acessar widget alheio."""
+        return self.production_tab.background_image()
+
+    def first_batch_item(self) -> str | None:
+        """Primeiro item do lote, sem acessar widget alheio."""
+        return self.production_tab.first_batch_item()
+
+    def append_qc(self, text: str) -> None:
+        self.production_tab._append_qc(text)
+
+    def bind_project(self, path: str | Path | None = None) -> bool:
+        """Fachada publica para set_media na casca de 7 abas (F3-I2)."""
+        return self.scene_tab.bind_project(path)
+
+    def production_busy(self) -> bool:
+        """Job principal da producao ativo (o job de audio nao conta)."""
+        return self.production_tab.production_busy() if self.production_tab else False
+
+    def busy_any(self) -> bool:
+        """Qualquer outro job do app ativo; AudioTab usa isso no guarda."""
+        if self.production_busy():
+            return True
+        for owner in (self.parent, self.root):
+            check = getattr(owner, "busy_any", None)
+            if callable(check):
+                try:
+                    if check():
+                        return True
+                except Exception:
+                    pass
+        return False
+
+    @property
+    def audio_worker(self) -> threading.Thread | None:
+        tab = getattr(self, "audio_tab", None)
+        return tab.audio_worker if tab is not None else None
+
+    @property
+    def audio_cancel_event(self) -> threading.Event | None:
+        tab = getattr(self, "audio_tab", None)
+        return tab.audio_cancel_event if tab is not None else None
+
+    # ---- ferramentas de audio (wrappers para tk_audio_tab.AudioTab) ----
     def _audio_use_selected(self) -> None:
-        selection = self.batch_list.curselection()
-        if selection:
-            self.audio_media.set(self.batch_list.get(selection[0]))
-        elif self.media_path:
-            self.audio_media.set(str(self.media_path))
+        self.audio_tab._audio_use_selected()
 
     def _audio_path(self) -> Path | None:
-        value = self.audio_media.get().strip()
-        path = Path(value) if value else None
-        if path is None or not path.is_file():
-            messagebox.showinfo(APP_NAME, "Escolha uma mídia para processar.")
-            return None
-        return path
+        return self.audio_tab._audio_path()
 
-    def _audio_run(self, args: list[str], suffix: str) -> None:
-        media = self._audio_path()
-        if media is None:
-            return
-        output = media.with_name(media.stem + " - " + suffix + ".wav")
-        env = os.environ.copy()
-        env["PYTHONPATH"] = str(VILM_APP_PATH)
-        env["PYTHONIOENCODING"] = "utf-8"
-        python = Path(sys.executable)
-        if python.name.casefold() == "pythonw.exe":
-            python = python.with_name("python.exe")
-        command = [str(python), "-m", "lyrics_aligner", "audio", str(media),
-                   "-o", str(output), "--work", str(media.parent / "trabalho" / "audio"), *args]
-        self.audio_log.configure(state="normal")
-        self.audio_log.delete("1.0", END)
-        self.audio_log.insert(END, "Processando áudio…\n")
-        self.audio_log.configure(state="disabled")
-        self.root.update_idletasks()
-        try:
-            result = subprocess.run(command, env=env, capture_output=True, text=True,
-                                    encoding="utf-8", errors="replace")
-            text = (result.stdout or "") + "\n" + (result.stderr or "")
-        except Exception as exc:
-            text = str(exc)
-        self.audio_log.configure(state="normal")
-        self.audio_log.insert(END, text[-4000:])
-        self.audio_log.see(END)
-        self.audio_log.configure(state="disabled")
+    def _audio_env(self) -> dict[str, str]:
+        return self.audio_tab._audio_env()
+
+    def _audio_command(self, args: list[str]) -> list[str]:
+        return self.audio_tab._audio_command(args)
+
+    def _audio_start(self, command: list[str]) -> None:
+        self.audio_tab._audio_start(command)
+
+    def _audio_job(self, command: list[str]) -> None:
+        self.audio_tab._audio_job(command)
+
+    def _audio_finish(self, status: str | None = None) -> None:
+        self.audio_tab._audio_finish(status)
+
+    def _audio_cancel(self) -> None:
+        self.audio_tab._audio_cancel()
+
+    def _audio_append_log(self, text: str) -> None:
+        self.audio_tab._audio_append_log(text)
+
+    def _project_root_for(self, path: str | Path | None = None) -> Path | None:
+        """Raiz do projeto que contem ``path`` (por padrao, a midia atual)."""
+        if path is None:
+            path = self.media_path or self.last_output or Path.cwd()
+        return _find_project_root(path)
+
+    def _audio_fields(self) -> dict[str, object]:
+        return self.audio_tab._audio_fields()
+
+    def _audio_field_args(self) -> list[str]:
+        return self.audio_tab._audio_field_args()
+
+    def _audio_output_paths(self, media: Path, suffix: str | None
+                            ) -> tuple[Path, Path | None]:
+        return self.audio_tab._audio_output_paths(media, suffix)
+
+    def _audio_run(self, args: list[str] | None = None, suffix: str = "audio") -> None:
+        self.audio_tab._audio_run(args, suffix)
 
     def _audio_analyze(self) -> None:
-        media = self._audio_path()
-        if media is None:
-            return
-        env = os.environ.copy(); env["PYTHONPATH"] = str(VILM_APP_PATH)
-        result = subprocess.run(
-            [sys.executable, "-m", "lyrics_aligner", "audio", str(media),
-             "-o", str(media.with_suffix(".wav")), "--analyze"],
-            env=env, capture_output=True, text=True, encoding="utf-8", errors="replace")
-        self.audio_log.configure(state="normal")
-        self.audio_log.delete("1.0", END)
-        self.audio_log.insert(END, result.stdout or result.stderr)
-        self.audio_log.configure(state="disabled")
+        self.audio_tab._audio_analyze()
 
     def _audio_instrumental(self) -> None:
-        self._audio_run(["--mode", "instrumental"], "instrumental")
+        self.audio_tab._audio_instrumental()
 
     def _audio_voice(self, gain: float) -> None:
-        self._audio_run(["--mode", "mix", "--voice-gain", str(gain),
-                         "--music-gain", "1.0", "--normalize"], "voz")
+        self.audio_tab._audio_voice(gain)
 
     def _audio_denoise(self) -> None:
-        self._audio_run(["--denoise", "8", "--normalize"], "limpo")
+        self.audio_tab._audio_denoise()
 
     def _audio_enhance(self) -> None:
-        self._audio_run(["--enhance", "voz", "--normalize"], "melhorado")
+        self.audio_tab._audio_enhance()
 
     def _configure_style(self) -> None:
         style = ttk.Style(self.root)
@@ -258,1172 +486,334 @@ class DesktopApp:
         style.configure("Primary.TButton", font=("Segoe UI", 10, "bold"), padding=(12, 8))
 
     def _build(self) -> None:
-        outer = ttk.Frame(self.root, padding=16)
+        outer = ttk.Frame(self.parent, padding=12)
         outer.pack(fill=BOTH, expand=True)
 
         header = ttk.Frame(outer)
         header.pack(fill=X, pady=(0, 10))
         ttk.Label(header, text=APP_NAME, style="Title.TLabel").pack(side=LEFT)
-        self.language_box = ttk.Combobox(header, state="readonly", width=12, values=["English", "한국어"])
+        self.language_box = ttk.Combobox(header, state="readonly", width=14,
+                                         values=[language_label(code) for code in available_languages()])
         self.language_box.pack(side=RIGHT)
-        self.language_box.current(0 if self.language == "en" else 1)
+        self.language_box.current(max(0, available_languages().index(self.language)))
         self.language_box.bind("<<ComboboxSelected>>", self._language_changed)
 
-        profile_frame = ttk.Frame(outer)
-        profile_frame.pack(fill=X, pady=(0, 8))
-        self.profile_label = ttk.Label(profile_frame, style="Section.TLabel")
-        self.profile_label.pack(anchor="w")
-        self.profile_info = ttk.Label(profile_frame, style="Hint.TLabel", wraplength=900)
-        self.profile_info.pack(anchor="w", pady=(2, 4))
-        profile_row = ttk.Frame(profile_frame)
-        profile_row.pack(fill=X)
-        names = list(self.profiles.get("profiles", {}).keys())
-        self.profile_box = ttk.Combobox(profile_row, state="readonly", width=36, values=names)
-        self.profile_box.pack(side=LEFT)
-        if self.active_profile in names:
-            self.profile_box.current(names.index(self.active_profile))
-        elif names:
-            self.active_profile = names[0]
-            self.profile_box.current(0)
-        self.profile_box.bind("<<ComboboxSelected>>", self._profile_changed)
+        # Bloco de producao movido para tk_production_tab.ProductionTab; os
+        # wrappers abaixo preservam todos os bindings e a casca existente.
+        from .tk_production_tab import ProductionTab
+        self.production_tab = ProductionTab(self, outer)
 
-        self.media_label = ttk.Label(outer, style="Section.TLabel")
-        self.media_label.pack(anchor="w")
-        self.media_hint = ttk.Label(outer, style="Hint.TLabel", wraplength=900)
-        self.media_hint.pack(anchor="w", pady=(2, 6))
-        media_row = ttk.Frame(outer)
-        media_row.pack(fill=X)
-        self.media_name = ttk.Label(media_row, relief="sunken", padding=8)
-        self.media_name.pack(side=LEFT, fill=X, expand=True)
-        self.browse_button = ttk.Button(media_row, command=self._browse_media)
-        self.browse_button.pack(side=RIGHT, padx=(8, 0))
+        # Bloco de audio movido para tk_audio_tab.AudioTab; os wrappers
+        # _audio_* abaixo preservam todos os bindings e a casca existente.
+        from .tk_audio_tab import AudioTab
+        self.audio_tab = AudioTab(self, outer)
 
-        self.range_label = ttk.Label(outer, style="Section.TLabel")
-        self.range_label.pack(anchor="w", pady=(14, 0))
-        range_modes = ttk.Frame(outer)
-        range_modes.pack(fill=X, pady=(3, 4))
-        self.range_mode = StringVar(value="full")
-        self.full_radio = ttk.Radiobutton(range_modes, variable=self.range_mode, value="full", command=self._range_mode_changed)
-        self.full_radio.pack(side=LEFT)
-        self.selection_radio = ttk.Radiobutton(range_modes, variable=self.range_mode, value="selection", command=self._range_mode_changed)
-        self.selection_radio.pack(side=LEFT, padx=(20, 0))
-        self.range_readout = ttk.Label(range_modes, text="00:00.00 — 00:00.00")
-        self.range_readout.pack(side=RIGHT)
-        self.waveform = Canvas(outer, height=88, background="#20242b", highlightthickness=1, highlightbackground="#555b66")
-        self.waveform.pack(fill=X)
-        self.waveform.bind("<Button-1>", self._wave_press)
-        self.waveform.bind("<B1-Motion>", self._wave_drag)
-        self.waveform.bind("<ButtonRelease-1>", self._wave_release)
-        self.waveform.bind("<Configure>", lambda _event: self._draw_waveform())
-        self.range_hint = ttk.Label(outer, style="Hint.TLabel", wraplength=900)
-        self.range_hint.pack(anchor="w", pady=(4, 0))
-
-        self.lyrics_label = ttk.Label(outer, style="Section.TLabel")
-        self.lyrics_label.pack(anchor="w", pady=(14, 0))
-        self.lyrics_hint = ttk.Label(outer, style="Hint.TLabel", wraplength=900)
-        self.lyrics_hint.pack(anchor="w", pady=(2, 4))
-        self.lyrics = Text(outer, height=7, wrap="word", undo=True, font=("Segoe UI", 10))
-        self.lyrics.pack(fill=BOTH, expand=True)
-        self.load_button = ttk.Button(outer, command=self._load_lyrics)
-        self.load_button.pack(anchor="e", pady=(5, 0))
-
-        options = ttk.Frame(outer)
-        options.pack(fill=X, pady=(12, 0))
-        self.mode_label = ttk.Label(options, style="Section.TLabel")
-        self.mode_label.grid(row=0, column=0, sticky="w", padx=(0, 8))
-        self.mode_box = ttk.Combobox(options, state="readonly", width=25)
-        self.mode_box.grid(row=0, column=1, sticky="ew")
-        self.mode_box.bind("<<ComboboxSelected>>", lambda _event: self._update_manual_visibility())
-        self.device_label = ttk.Label(options)
-        self.device_label.grid(row=0, column=2, sticky="e", padx=(24, 8))
-        devices = (
-            ["CUDA · NVIDIA", "CPU"]
-            if self.backend == "cuda"
-            else ["Apple GPU · Metal", "CPU"]
-            if self.backend == "mps"
-            else ["CPU"]
-        )
-        self.device_box = ttk.Combobox(options, state="readonly", width=20, values=devices)
-        self.device_box.grid(row=0, column=3, sticky="ew")
-        self.device_box.current(0)
-        options.columnconfigure(1, weight=1)
-        options.columnconfigure(3, weight=1)
-
-        self.manual_frame = ttk.Frame(outer)
-        ttk.Label(self.manual_frame, text="").grid(row=0, column=0)
-        self.max_chars_label = ttk.Label(self.manual_frame)
-        self.max_chars_label.grid(row=0, column=1, padx=(0, 5))
-        self.max_chars = StringVar(value="30")
-        ttk.Spinbox(self.manual_frame, from_=1, to=80, width=6, textvariable=self.max_chars).grid(row=0, column=2)
-        self.max_duration_label = ttk.Label(self.manual_frame)
-        self.max_duration_label.grid(row=0, column=3, padx=(18, 5))
-        self.max_duration = StringVar(value="10")
-        ttk.Spinbox(self.manual_frame, from_=3, to=30, width=6, textvariable=self.max_duration).grid(row=0, column=4)
-        self.end_hold_label = ttk.Label(self.manual_frame)
-        self.end_hold_label.grid(row=0, column=5, padx=(18, 5))
-        self.end_hold = ttk.Combobox(self.manual_frame, state="readonly", width=10, values=["0.3 s", "0.5 s", "1.0 s", "1.5 s"])
-        self.end_hold.grid(row=0, column=6)
-        self.end_hold.current(1)
-
-        self.guide = ttk.Label(outer, style="Hint.TLabel", wraplength=900)
-        self.guide.pack(fill=X, pady=(10, 6))
-        action_row = ttk.Frame(outer)
-        action_row.pack(fill=X)
-        self.status = ttk.Label(action_row)
-        self.status.pack(side=LEFT, fill=X, expand=True)
-        self.open_folder_button = ttk.Button(action_row, command=self._open_output_folder)
-        self.cancel_button = ttk.Button(action_row, command=self._cancel)
-        self.generate_button = ttk.Button(action_row, style="Primary.TButton", command=self._generate)
-        self.generate_button.pack(side=RIGHT)
-        self.progress = ttk.Progressbar(outer, mode="indeterminate")
-        self.progress.pack(fill=X, pady=(7, 0))
-        self.log = Text(outer, height=4, state="disabled", wrap="word", font=("Consolas", 9))
-        self.log.pack(fill=X, pady=(6, 0))
-
-        batch = ttk.LabelFrame(outer, text="Vídeo karaokê (lote)", padding=8)
-        batch.pack(fill=X, pady=(10, 0))
-        top = ttk.Frame(batch); top.pack(fill=X)
-        ttk.Label(top, text="Intro (s)").pack(side=LEFT)
-        self.intro_seconds = StringVar(value="4")
-        ttk.Spinbox(top, from_=0, to=10, width=5, textvariable=self.intro_seconds).pack(side=LEFT, padx=(4, 14))
-        ttk.Label(top, text="Logo final").pack(side=LEFT)
-        self.logo_var = StringVar()
-        ttk.Entry(top, textvariable=self.logo_var, width=36).pack(side=LEFT, padx=4)
-        ttk.Button(top, text="…", width=3, command=self._browse_logo).pack(side=LEFT)
-        ttk.Label(top, text="Fundo").pack(side=LEFT, padx=(14, 0))
-        self.bg_var = StringVar()
-        ttk.Entry(top, textvariable=self.bg_var, width=22).pack(side=LEFT, padx=4)
-        ttk.Button(top, text="…", width=3, command=self._browse_bg).pack(side=LEFT)
-
-        name_row = ttk.Frame(batch); name_row.pack(fill=X, pady=(6, 0))
-        ttk.Label(name_row, text="Nome do arquivo").pack(side=LEFT)
-        self.name_var = StringVar(value="{pasta}")
-        ttk.Entry(name_row, textvariable=self.name_var, width=44).pack(side=LEFT, padx=4)
-        ttk.Label(name_row, text="({pasta} = nome da pasta do hino)",
-                  style="Hint.TLabel").pack(side=LEFT)
-        self.transition_var = StringVar(value="")
-        ttk.Combobox(name_row, state="readonly", width=12, textvariable=self.transition_var,
-                     values=["", "fade", "dissolve", "wipeleft", "slideright", "smoothup"]
-                     ).pack(side=RIGHT)
-        ttk.Label(name_row, text="Transição").pack(side=RIGHT, padx=(8, 2))
-
-        mid = ttk.Frame(batch); mid.pack(fill=X, pady=(8, 0))
-        self.preview = ttk.Label(mid, relief="sunken", background="#20242b", width=320)
-        self.preview.pack(side=LEFT, fill=Y)
-        list_frame = ttk.Frame(mid); list_frame.pack(side=LEFT, fill=BOTH, expand=True, padx=(10, 0))
-        self.batch_list = Listbox(list_frame, height=5)
-        self.batch_list.pack(side=LEFT, fill=BOTH, expand=True)
-        buttons = ttk.Frame(list_frame); buttons.pack(side=RIGHT, fill=Y, padx=(6, 0))
-        ttk.Button(buttons, text="Adicionar", command=self._add_batch).pack(fill=X)
-        ttk.Button(buttons, text="Adicionar pasta", command=self._add_folder).pack(fill=X, pady=4)
-        ttk.Button(buttons, text="Remover", command=self._remove_batch).pack(fill=X, pady=4)
-        ttk.Button(buttons, text="Limpar", command=self._clear_batch).pack(fill=X)
-        ttk.Button(buttons, text="Gerar vídeos", style="Primary.TButton",
-                   command=self._generate_batch).pack(fill=X, pady=(12, 0))
-
-        ttk.Label(batch, text="Controle de qualidade (preflight)").pack(anchor="w", pady=(8, 0))
-        self.qc_text = Text(batch, height=5, wrap="word", font=("Consolas", 9))
-        self.qc_text.pack(fill=X)
-
-        audio_frame = ttk.LabelFrame(outer, text="Áudio (voz, playback, ruído, qualidade)", padding=8)
-        audio_frame.pack(fill=X, pady=(10, 0))
-        arow = ttk.Frame(audio_frame); arow.pack(fill=X)
-        ttk.Label(arow, text="Mídia").pack(side=LEFT)
-        self.audio_media = StringVar()
-        ttk.Entry(arow, textvariable=self.audio_media, width=70).pack(side=LEFT, padx=4)
-        ttk.Button(arow, text="Usar selecionada", command=self._audio_use_selected).pack(side=LEFT)
-        ttk.Button(arow, text="Analisar", command=self._audio_analyze).pack(side=LEFT, padx=(8, 0))
-        arow2 = ttk.Frame(audio_frame); arow2.pack(fill=X, pady=(6, 0))
-        ttk.Button(arow2, text="Extrair instrumental", command=self._audio_instrumental).pack(side=LEFT)
-        ttk.Button(arow2, text="Voz +", command=lambda: self._audio_voice(1.6)).pack(side=LEFT, padx=4)
-        ttk.Button(arow2, text="Voz −", command=lambda: self._audio_voice(0.6)).pack(side=LEFT)
-        ttk.Button(arow2, text="Reduzir ruído", command=self._audio_denoise).pack(side=LEFT, padx=4)
-        ttk.Button(arow2, text="Normalizar / melhorar", command=self._audio_enhance).pack(side=LEFT)
-        self.audio_log = Text(audio_frame, height=4, wrap="word", font=("Consolas", 9))
-        self.audio_log.pack(fill=X, pady=(6, 0))
-
-        scene_frame = ttk.LabelFrame(outer, text="Composição de cena (imagens e texto)", padding=8)
-        scene_frame.pack(fill=X, pady=(10, 0))
-        tools = ttk.Frame(scene_frame); tools.pack(fill=X)
-        ttk.Button(tools, text="Nova cena", command=self._scene_new).pack(side=LEFT)
-        ttk.Button(tools, text="Abrir JSON…", command=self._scene_open).pack(side=LEFT, padx=4)
-        ttk.Button(tools, text="Salvar JSON…", command=self._scene_save).pack(side=LEFT)
-        ttk.Button(tools, text="+ Imagem", command=self._scene_add_image).pack(side=LEFT, padx=(14, 0))
-        ttk.Button(tools, text="+ Texto", command=self._scene_add_text).pack(side=LEFT, padx=4)
-        ttk.Button(tools, text="Remover", command=self._scene_remove).pack(side=LEFT)
-        ttk.Button(tools, text="Desfazer", command=self._scene_undo).pack(side=LEFT, padx=(14, 0))
-        ttk.Button(tools, text="Refazer", command=self._scene_redo).pack(side=LEFT, padx=4)
-        ttk.Button(tools, text="Efeitos…", command=self._scene_fx_dialog).pack(side=RIGHT, padx=(0, 6))
-        ttk.Button(tools, text="Prévia", command=self._scene_preview).pack(side=RIGHT)
-        self.snap_var = BooleanVar(value=True)
-        Checkbutton(tools, text="Snap", variable=self.snap_var).pack(side=RIGHT, padx=(0, 6))
-        self.grid_var = IntVar(value=20)
-        ttk.Spinbox(tools, from_=5, to=200, width=5, textvariable=self.grid_var).pack(side=RIGHT, padx=(0, 4))
-        ttk.Label(tools, text="Formato").pack(side=RIGHT, padx=(8, 2))
-        self.format_var = StringVar(value="1920x1080")
-        self.format_box = ttk.Combobox(tools, state="readonly", width=12,
-                                       textvariable=self.format_var,
-                                       values=list({"1920x1080", "1280x720", "3840x2160",
-                                                    "1080x1920", "1080x1080"}))
-        self.format_box.pack(side=RIGHT)
-        self.format_box.bind("<<ComboboxSelected>>", self._scene_format_changed)
-
-        stage = ttk.Frame(scene_frame); stage.pack(fill=X, pady=(6, 0))
-        self.scene_canvas = Canvas(stage, width=480, height=270, background="#1a1d24",
-                                   highlightthickness=1, highlightbackground="#555b66")
-        self.scene_canvas.pack(side=LEFT)
-        self.scene_canvas.bind("<Button-1>", self._scene_press)
-        self.scene_canvas.bind("<B1-Motion>", self._scene_drag)
-        self.scene_canvas.bind("<ButtonRelease-1>", self._scene_release)
-        self.preview_label = ttk.Label(stage, relief="sunken", background="#20242b", width=300)
-        self.preview_label.pack(side=LEFT, fill=BOTH, expand=True, padx=(10, 0))
-
-        self.scene_list = Listbox(stage, height=6, width=24)
-        self.scene_list.pack(side=LEFT, fill=Y, padx=(10, 0))
-        self.scene_list.bind("<<ListboxSelect>>", self._scene_select)
-
-        props = ttk.Frame(scene_frame); props.pack(fill=X, pady=(6, 0))
-        self.pvars = {key: StringVar() for key in
-                      ("x", "y", "w", "h", "start", "end", "fade_in", "fade_out",
-                       "text", "font_size", "color", "file")}
-        fields = [("x", "X"), ("y", "Y"), ("w", "Largura"), ("h", "Altura"),
-                  ("start", "Entra (s)"), ("end", "Sai (s)"),
-                  ("fade_in", "Fade in"), ("fade_out", "Fade out"),
-                  ("text", "Texto"), ("font_size", "Fonte"), ("color", "Cor")]
-        for index, (key, label) in enumerate(fields):
-            row = index // 6; col = (index % 6) * 2
-            ttk.Label(props, text=label).grid(row=row, column=col, sticky="w", padx=(0, 4), pady=2)
-            width = 30 if key == "text" else 10
-            ttk.Entry(props, textvariable=self.pvars[key], width=width).grid(
-                row=row, column=col + 1, sticky="ew", pady=2)
-        ttk.Button(props, text="Aplicar", command=self._scene_apply_props).grid(
-            row=2, column=0, columnspan=12, pady=(6, 0))
-        props.columnconfigure(11, weight=1)
-
-        self.timeline = Canvas(scene_frame, height=90, background="#252932",
-                               highlightthickness=1, highlightbackground="#555b66")
-        self.timeline.pack(fill=X, pady=(8, 0))
-        self.timeline.bind("<Button-1>", self._timeline_press)
-        self.timeline.bind("<B1-Motion>", self._timeline_drag)
-        self.timeline.bind("<ButtonRelease-1>", self._timeline_release)
-
-        self.scene = {"version": 1, "width": 1920, "height": 1080, "layers": []}
-        self.scene_history: list[dict] = []
-        self.scene_future: list[dict] = []
-        self.selected_layer: int | None = None
-        self.drag_mode: str | None = None
-        self._scene_load_autosave()
-        self._scene_redraw()
+        # Bloco de cena movido para tk_scene_tab.SceneTab; os 28 wrappers
+        # _scene_* / _snap / _draw_timeline / _timeline_* abaixo preservam todos
+        # os bindings e a casca existente (5 abas).
+        from .tk_scene_tab import SceneTab
+        self.scene_tab = SceneTab(self, outer)
 
         self._apply_profile()
+
+    # ---- producao: wrappers para tk_production_tab.ProductionTab -------
+    # Assinaturas identicas as do modulo: bindings e casca permanecem, sem
+    # logica duplicada nesta fachada.
+    def _profile_timing(self) -> dict[str, int]:
+        return self.production_tab._profile_timing()
 
     def _apply_profile(self) -> None:
-        """Apply the selected profile's timing settings to the controls."""
-        profile = self.profiles.get("profiles", {}).get(self.active_profile)
-        settings = (profile or {}).get("settings", {})
-        alignment = settings.get("alignment", {})
-        if alignment:
-            self.max_chars.set(str(alignment.get("max_chars", 30)))
-            self.max_duration.set(str(int(alignment.get("max_duration_ms", 10000) / 1000)))
-            hold = int(alignment.get("end_pad_ms", 500))
-            holds = [300, 500, 1000, 1500]
-            index = holds.index(hold) if hold in holds else 1
-            self.end_hold.current(index)
-            self.lead_ms = int(alignment.get("lead_ms", 600))
-            if self.mode_box.cget("values"):
-                self.mode_box.current(1 if alignment.get("mode") == "manual" else 0)
-        self.profile_info.configure(text=(profile or {}).get("description", ""))
-        extras = (profile or {}).get("extras", {})
-        if hasattr(self, "intro_seconds"):
-            self.intro_seconds.set(str(int(extras.get("intro_seconds", 0))))
-            root = Path((profile or {}).get("projects_root") or "")
-            logo_name = extras.get("outro_image_file")
-            if logo_name and (root / logo_name).is_file():
-                self.logo_var.set(str(root / logo_name))
-            else:
-                self.logo_var.set("")
-            self.bg_var.set("")
-        self._update_manual_visibility()
-        self._update_preview()
+        self.production_tab._apply_profile()
 
     def _update_preview(self) -> None:
-        """Desenha uma prévia aproximada com a fonte/cor/posicao do perfil."""
-        if not hasattr(self, "preview"):
-            return
-        profile = self.profiles.get("profiles", {}).get(self.active_profile, {})
-        k = (profile.get("settings", {}).get("karaoke") or {})
-        bg_name = self.bg_var.get().strip() if hasattr(self, "bg_var") else ""
-        bg_path = Path(bg_name) if bg_name else None
-        if not bg_path or not bg_path.is_file():
-            first = self.batch_list.get(0) if hasattr(self, "batch_list") and self.batch_list.size() else ""
-            if first:
-                bg_path = next((p for p in Path(first).parent.glob("FUNDO*") if p.suffix.lower() in {".png", ".jpg", ".jpeg"}), None)
-        size = (320, 180)
-        try:
-            if bg_path and bg_path.is_file():
-                base = Image.open(bg_path).convert("RGB").resize(size)
-            else:
-                base = Image.new("RGB", size, (255, 243, 232))
-            draw = ImageDraw.Draw(base)
-            font_size = max(10, int(int(k.get("font_size", 84)) * size[1] / 1080 * 1.6))
-            try:
-                font = ImageFont.truetype("arial.ttf", font_size)
-            except OSError:
-                font = ImageFont.load_default()
-            color = k.get("normal_color", "#000000")
-            lines = ["Caminhando eu vou para Canaã", "Se você não vai... lhe convido a ir",
-                     "Glória a Deus, Caminhando eu vou para Canaã."]
-            y = int(size[1] * 0.45)
-            for line in lines:
-                draw.text((size[0] // 2, y), line, fill=color, font=font, anchor="mm")
-                y += font_size + 4
-            logo = self.logo_var.get().strip() if hasattr(self, "logo_var") else ""
-            if logo and Path(logo).is_file():
-                mark = Image.open(logo).convert("RGBA")
-                mark.thumbnail((80, 80))
-                base.paste(mark, (size[0] - 88, 8), mark)
-            image = ImageTk.PhotoImage(base)
-            self.preview.configure(image=image)
-            self.preview.image = image
-        except Exception:
-            pass
+        self.production_tab._update_preview()
 
     def _profile_changed(self, _event=None) -> None:
-        name = self.profile_box.get()
-        self.active_profile = name
-        PREFERENCES_PATH.parent.mkdir(parents=True, exist_ok=True)
-        PREFERENCES_PATH.write_text(
-            json.dumps({**self.preferences, "profile": name}), encoding="utf-8"
-        )
-        self._apply_profile()
+        self.production_tab._profile_changed(_event)
 
     def _browse_logo(self) -> None:
-        path = filedialog.askopenfilename(filetypes=[("Imagem", "*.png *.jpg *.jpeg *.webp")])
-        if path:
-            self.logo_var.set(path)
-            self._update_preview()
+        self.production_tab._browse_logo()
 
     def _browse_bg(self) -> None:
-        path = filedialog.askopenfilename(filetypes=[("Imagem", "*.png *.jpg *.jpeg *.webp")])
-        if path:
-            self.bg_var.set(path)
-            self._update_preview()
+        self.production_tab._browse_bg()
 
     def _add_batch(self) -> None:
-        files = filedialog.askopenfilenames(filetypes=[
-            ("Mídia", "*.mp4 *.mov *.mkv *.avi *.mpeg *.mpg *.mp3 *.wav *.m4a *.aac *.flac *.ogg")])
-        for item in files:
-            if item not in self.batch_list.get(0, END):
-                self.batch_list.insert(END, item)
-        self._update_preview()
+        self.production_tab._add_batch()
 
     def _add_folder(self) -> None:
-        folder = filedialog.askdirectory(title="Pasta com hinos")
-        if not folder:
-            return
-        root = Path(folder)
-        extensions = {".mp4", ".mov", ".mkv", ".avi", ".mpeg", ".mpg",
-                      ".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
-        for path in sorted(root.rglob("*")):
-            if path.is_file() and path.suffix.lower() in extensions:
-                item = str(path)
-                if item not in self.batch_list.get(0, END):
-                    self.batch_list.insert(END, item)
-        self._update_preview()
+        self.production_tab._add_folder()
 
-    def _scene_name_for(self, folder: Path, count: int) -> str:
-        template = self.name_var.get().strip() or "{pasta}"
-        name = template.replace("{pasta}", folder.name)
-        if count == 1 and "{pasta}" not in template:
-            name = template
-        invalid = '<>:"/\\|?*'
-        return "".join(ch for ch in name if ch not in invalid).strip() or folder.name
+    def _scene_name_for(self, folder: Path, count: int,
+                        template: str | None = None) -> str:
+        return self.production_tab._scene_name_for(folder, count, template)
 
-    def _write_history(self, folder: Path, outputs: list[str], warnings: list[str]) -> None:
-        path = folder / "history.csv"
-        is_new = not path.exists()
-        try:
-            with path.open("a", encoding="utf-8-sig", newline="") as handle:
-                handle.write(
-                    ("" if is_new else "\n")
-                    + f"{datetime.now():%Y-%m-%d %H:%M:%S};{self.active_profile};"
-                    + ";".join(Path(o).name for o in outputs)
-                    + ";" + " | ".join(warnings)[:300]
-                )
-        except OSError:
-            pass
+    def _write_history(self, folder: Path, outputs: list[str],
+                       warnings: list[str]) -> None:
+        self.production_tab._write_history(folder, outputs, warnings)
+
+    def _record_history(self, folders, outputs: list[str],
+                        warnings: list[str]) -> None:
+        self.production_tab._record_history(folders, outputs, warnings)
+
+    def _update_project_outputs(self, project_dir: str | Path | None,
+                                outputs: dict[str, str] | None = None,
+                                **details) -> None:
+        self.production_tab._update_project_outputs(project_dir, outputs, **details)
 
     def _remove_batch(self) -> None:
-        for index in reversed(self.batch_list.curselection()):
-            self.batch_list.delete(index)
+        self.production_tab._remove_batch()
 
     def _clear_batch(self) -> None:
-        self.batch_list.delete(0, END)
+        self.production_tab._clear_batch()
 
     def _append_qc(self, text: str) -> None:
-        self.qc_text.configure(state="normal")
-        self.qc_text.insert(END, text + "\n")
-        self.qc_text.see(END)
-        self.qc_text.configure(state="disabled")
+        self.production_tab._append_qc(text)
 
     def _generate_batch(self) -> None:
-        if self.worker and self.worker.is_alive():
-            return
-        items = list(self.batch_list.get(0, END))
-        if not items:
-            messagebox.showinfo(APP_NAME, self.tr("need_media"))
-            return
-        self.qc_text.configure(state="normal")
-        self.qc_text.delete("1.0", END)
-        self.qc_text.configure(state="disabled")
-        self.cancel_event.clear()
-        self.worker = threading.Thread(target=self._batch_worker, args=(items,), daemon=True)
-        self.worker.start()
+        self.production_tab._generate_batch()
 
-    def _batch_worker(self, items: list[str]) -> None:
-        python = Path(sys.executable)
-        if python.name.casefold() == "pythonw.exe":
-            console = python.with_name("python.exe")
-            if console.is_file():
-                python = console
-        env = os.environ.copy()
-        env["PYTHONPATH"] = str(VILM_APP_PATH)
-        env["PYTHONIOENCODING"] = "utf-8"
-        for item in items:
-            if self.cancel_event.is_set():
-                break
-            media = Path(item)
-            folder = media.parent
-            lyrics = folder / "letra.txt"
-            if not lyrics.is_file():
-                self.events.put(("batch_status", f"ERRO: sem letra.txt em {folder.name}"))
-                continue
-            images = [p for p in folder.iterdir()
-                      if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}]
-            title = next((p for p in images if "FUNDO" not in p.name.upper()), None)
-            bg = Path(self.bg_var.get()) if self.bg_var.get().strip() else next(
-                (p for p in images if "FUNDO" in p.name.upper()), None)
-            playback = next((p for p in folder.iterdir()
-                             if p.is_file() and "PLAYBACK" in p.name.upper()), None)
-            logo = Path(self.logo_var.get()) if self.logo_var.get().strip() else None
-            saida = folder / "saida"
-            saida.mkdir(parents=True, exist_ok=True)
-            output = saida / (self._scene_name_for(folder, len(items)) + ".mp4")
-            self.events.put(("batch_status", f"Processando {folder.name}…"))
-            work = folder / "trabalho" / "cli"
-            cmd = [str(python), "-m", "lyrics_aligner", "make", str(media), str(lyrics),
-                   "-o", str(output), "--profile", self.active_profile, "--work", str(work)]
-            if title: cmd += ["--title-image", str(title)]
-            if bg and bg.is_file(): cmd += ["--background", str(bg)]
-            if logo and logo.is_file(): cmd += ["--logo", str(logo)]
-            if playback: cmd += ["--playback", str(playback)]
-            if self.transition_var.get():
-                cmd += ["--transition", self.transition_var.get(),
-                        "--transition-duration", "0.4"]
-            if self.scene.get("layers"):
-                from .scene import save_scene
-                scene_file = work / "scene.json"
-                save_scene(scene_file, self.scene)
-                cmd += ["--scene", str(scene_file)]
-            try:
-                result = subprocess.run(cmd, env=env, capture_output=True, text=True,
-                                        encoding="utf-8", errors="replace")
-                if result.returncode != 0:
-                    self.events.put(("batch_status", f"FALHOU {folder.name}: "
-                                     + (result.stderr or result.stdout)[-300:]))
-                    continue
-                self.events.put(("batch_status", f"OK {folder.name}"))
-                report_path = work / "qc.json"
-                report = json.loads(report_path.read_text(encoding="utf-8")) \
-                    if report_path.is_file() else {}
-                warnings = list(report.get("warnings", []))
-                for warning in warnings:
-                    self.events.put(("qc", f"{folder.name}: {warning}"))
-                self._write_history(folder, report.get("outputs", [str(output)]), warnings)
-            except Exception as exc:
-                self.events.put(("batch_status", f"FALHOU {folder.name}: {exc}"))
-        self.events.put(("batch_done", None))
+    def _batch_worker(self, items: list[str], snapshot: dict) -> None:
+        self.production_tab._batch_worker(items, snapshot)
 
-    # ---- editor de cena -------------------------------------------------
+    # ---- editor de cena: 28 wrappers para tk_scene_tab.SceneTab ---------
+    # Assinaturas identicas as do modulo: atalhos e bindings continuam
+    # acionando o modulo, sem logica de cena duplicada nesta fachada.
     def _scene_push(self) -> None:
-        self.scene_history.append(copy.deepcopy(self.scene))
-        self.scene_future.clear()
+        self.scene_tab._scene_push()
 
     def _snap(self, value: float) -> float:
-        if not self.snap_var.get():
-            return round(value, 1)
-        grid = max(1, int(self.grid_var.get()))
-        return float(round(value / grid) * grid)
+        return self.scene_tab._snap(value)
+
+    def _scene_autosave_path(self) -> Path:
+        return self.scene_tab._scene_autosave_path()
+
+    def _scene_bind_project(self, path: str | Path | None = None) -> bool:
+        return self.scene_tab._scene_bind_project(path)
+
+    def _scene_view(self) -> tuple[int, int, float, float]:
+        return self.scene_tab._scene_view()
 
     def _scene_autosave(self) -> None:
-        try:
-            AUTOSAVE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            AUTOSAVE_PATH.write_text(json.dumps(self.scene, ensure_ascii=False, indent=2),
-                                     encoding="utf-8")
-        except OSError:
-            pass
+        self.scene_tab._scene_autosave()
 
     def _scene_load_autosave(self) -> None:
-        if not AUTOSAVE_PATH.is_file():
-            return
-        try:
-            scene = json.loads(AUTOSAVE_PATH.read_text(encoding="utf-8"))
-            if isinstance(scene.get("layers"), list):
-                self.scene = scene
-                self._append_qc("Cena restaurada do autosave.")
-        except (OSError, ValueError):
-            pass
+        self.scene_tab._scene_load_autosave()
 
     def _scene_redraw(self) -> None:
-        c = self.scene_canvas
-        c.delete("all")
-        scale = 480 / 1920
-        c.create_rectangle(0, 0, 480, 270, fill="#2b303b", outline="")
-        if self.snap_var.get():
-            grid = max(1, int(self.grid_var.get())) * scale
-            gx = grid
-            while gx < 480:
-                c.create_line(gx, 0, gx, 270, fill="#333944")
-                gx += grid
-            gy = grid
-            while gy < 270:
-                c.create_line(0, gy, 480, gy, fill="#333944")
-                gy += grid
-        from .scene import safe_bounds
-        sw = int(self.scene.get("width", 1920)); sh = int(self.scene.get("height", 1080))
-        x1, y1, x2, y2 = safe_bounds(self.scene)
-        c.create_rectangle(x1 / sw * 480, y1 / sh * 270, x2 / sw * 480, y2 / sh * 270,
-                           outline="#d95f5f", dash=(4, 3))
-        scale_x = 480 / sw; scale_y = 270 / sh
-        for index, layer in enumerate(self.scene.get("layers", [])):
-            x = float(layer.get("x", 0)) * scale_x
-            y = float(layer.get("y", 0)) * scale_y
-            w = max(6, float(layer.get("w", sw)) * scale_x)
-            h = max(6, float(layer.get("h", sh)) * scale_y)
-            color = "#4a90d9" if layer.get("type") == "image" else "#d9a441"
-            c.create_rectangle(x, y, x + w, y + h, outline=color, width=2, tags=f"layer{index}")
-            c.create_rectangle(x + w - 8, y + h - 8, x + w, y + h,
-                               fill=color, outline="", tags=f"handle{index}")
-            if layer.get("type") == "text":
-                c.create_text(x + w / 2, y + h / 2, text=str(layer.get("text", ""))[:22],
-                              fill="white", tags=f"layer{index}")
-        self.scene_list.delete(0, END)
-        for index, layer in enumerate(self.scene.get("layers", [])):
-            label = f"{index + 1}. {layer.get('type')}  {layer.get('text') or Path(str(layer.get('file') or '')).name}"
-            self.scene_list.insert(END, label[:34])
-        self._draw_timeline()
-        self._scene_autosave()
+        self.scene_tab._scene_redraw()
 
     def _draw_timeline(self) -> None:
-        c = self.timeline
-        c.delete("all")
-        width = max(400, c.winfo_width())
-        total = max(30.0, max((float(l.get("end") or 0) for l in self.scene.get("layers", [])), default=0) + 5)
-        self.timeline_total = total
-        self.timeline_px = width / total
-        for second in range(0, int(total) + 1, 5):
-            x = second * self.timeline_px
-            c.create_line(x, 0, x, 90, fill="#3a404b")
-            c.create_text(x + 4, 4, text=f"{second}s", anchor="nw", fill="#9aa4b2")
-        for index, layer in enumerate(self.scene.get("layers", [])):
-            start = float(layer.get("start", 0))
-            end = float(layer.get("end") or (start + 5))
-            color = "#4a90d9" if layer.get("type") == "image" else "#d9a441"
-            y = 22 + index * 13
-            c.create_rectangle(start * self.timeline_px, y, end * self.timeline_px, y + 11,
-                               fill=color, outline="", tags=f"bar{index}")
+        self.scene_tab._draw_timeline()
 
     def _scene_format_changed(self, _event=None) -> None:
-        from .scene import preset_size
-        width, height, margin = preset_size(self.format_var.get())
-        self.scene["width"] = width
-        self.scene["height"] = height
-        self.scene["preset"] = self.format_var.get()
-        self.scene["safe_margin"] = margin
-        self._scene_push()
-        self._scene_redraw()
+        self.scene_tab._scene_format_changed(_event)
 
     def _scene_select(self, _event=None) -> None:
-        selection = self.scene_list.curselection()
-        if not selection:
-            return
-        self.selected_layer = int(selection[0])
-        layer = self.scene["layers"][self.selected_layer]
-        for key in self.pvars:
-            self.pvars[key].set(str(layer.get(key, "")))
-        self._scene_redraw()
+        self.scene_tab._scene_select(_event)
 
     def _scene_apply_props(self) -> None:
-        if self.selected_layer is None:
-            return
-        self._scene_push()
-        layer = self.scene["layers"][self.selected_layer]
-        for key in ("x", "y", "w", "h", "start", "fade_in", "fade_out", "font_size"):
-            try:
-                value = float(self.pvars[key].get())
-                if key in ("x", "y", "w", "h"):
-                    value = self._snap(value)
-                layer[key] = value
-            except ValueError:
-                pass
-        try:
-            layer["end"] = float(self.pvars["end"].get())
-        except ValueError:
-            layer["end"] = None
-        layer["text"] = self.pvars["text"].get()
-        layer["color"] = self.pvars["color"].get()
-        self._scene_redraw()
+        self.scene_tab._scene_apply_props()
 
     def _scene_press(self, event) -> None:
-        item = self.scene_canvas.find_withtag("current")
-        if not item:
-            self.selected_layer = None
-            self._scene_redraw()
-            return
-        tags = self.scene_canvas.gettags(item[0])
-        tag = next((t for t in tags if t.startswith("layer") or t.startswith("handle")), None)
-        if not tag:
-            return
-        self.selected_layer = int(tag.replace("layer", "").replace("handle", ""))
-        self.drag_mode = "resize" if tag.startswith("handle") else "move"
-        self.drag_origin = (event.x, event.y)
-        self._scene_push()
-        layer = self.scene["layers"][self.selected_layer]
-        self.drag_values = {k: float(layer.get(k, 0)) for k in ("x", "y", "w", "h")}
-        self.scene_list.selection_clear(0, END)
-        self.scene_list.select_set(self.selected_layer)
-        for key in self.pvars:
-            self.pvars[key].set(str(layer.get(key, "")))
+        self.scene_tab._scene_press(event)
 
     def _scene_drag(self, event) -> None:
-        if self.selected_layer is None or not hasattr(self, "drag_values"):
-            return
-        scale_x = 480 / int(self.scene.get("width", 1920))
-        scale_y = 270 / int(self.scene.get("height", 1080))
-        dx = (event.x - self.drag_origin[0]) / scale_x
-        dy = (event.y - self.drag_origin[1]) / scale_y
-        layer = self.scene["layers"][self.selected_layer]
-        origin = self.drag_values
-        if self.drag_mode == "move":
-            layer["x"] = max(0, self._snap(origin["x"] + dx))
-            layer["y"] = max(0, self._snap(origin["y"] + dy))
-        else:
-            layer["w"] = max(40, self._snap(origin["w"] + dx))
-            layer["h"] = max(40, self._snap(origin["h"] + dy))
-        self._scene_redraw()
+        self.scene_tab._scene_drag(event)
 
     def _scene_release(self, _event=None) -> None:
-        self.drag_mode = None
-        if hasattr(self, "drag_values"):
-            del self.drag_values
+        self.scene_tab._scene_release(_event)
 
     def _timeline_press(self, event) -> None:
-        item = self.timeline.find_withtag("current")
-        if not item:
-            return
-        tag = next((t for t in self.timeline.gettags(item[0]) if t.startswith("bar")), None)
-        if not tag:
-            return
-        self.selected_layer = int(tag.replace("bar", ""))
-        self._scene_push()
-        layer = self.scene["layers"][self.selected_layer]
-        start = float(layer.get("start", 0)); end = float(layer.get("end") or (start + 5))
-        self.timeline_origin = (event.x, start, end, end - 5 <= event.x / self.timeline_px <= end + 5)
+        self.scene_tab._timeline_press(event)
 
     def _timeline_drag(self, event) -> None:
-        if not hasattr(self, "timeline_origin") or self.selected_layer is None:
-            return
-        x0, start, end, resize = self.timeline_origin
-        delta = (event.x - x0) / self.timeline_px
-        layer = self.scene["layers"][self.selected_layer]
-        if resize:
-            layer["end"] = max(0.5, end + delta)
-        else:
-            layer["start"] = max(0.0, start + delta)
-            layer["end"] = max(layer["start"] + 0.5, end + delta)
-        self._draw_timeline()
-        for key in ("start", "end"):
-            self.pvars[key].set(str(layer.get(key, "")))
+        self.scene_tab._timeline_drag(event)
 
     def _timeline_release(self, _event=None) -> None:
-        if hasattr(self, "timeline_origin"):
-            del self.timeline_origin
+        self.scene_tab._timeline_release(_event)
 
     def _scene_new(self) -> None:
-        self._scene_push()
-        self.scene = {"version": 1, "width": 1920, "height": 1080, "layers": []}
-        self.selected_layer = None
-        self._scene_redraw()
+        self.scene_tab._scene_new()
 
     def _scene_open(self) -> None:
-        path = filedialog.askopenfilename(filetypes=[("Scene JSON", "*.json")])
-        if not path:
-            return
-        try:
-            from .scene import load_scene, validate_scene
-            self._scene_push()
-            self.scene = load_scene(path)
-            for warning in validate_scene(self.scene):
-                self._append_qc("CENA: " + warning)
-            self._scene_redraw()
-        except Exception as exc:
-            messagebox.showerror(APP_NAME, str(exc))
+        self.scene_tab._scene_open()
 
     def _scene_save(self) -> None:
-        path = filedialog.asksaveasfilename(defaultextension=".json",
-                                            filetypes=[("Scene JSON", "*.json")],
-                                            initialfile="cena.json")
-        if path:
-            from .scene import save_scene
-            save_scene(path, self.scene)
+        self.scene_tab._scene_save()
 
     def _scene_add_image(self) -> None:
-        path = filedialog.askopenfilename(filetypes=[("Imagem", "*.png *.jpg *.jpeg *.webp")])
-        if not path:
-            return
-        self._scene_push()
-        self.scene["layers"].append({"type": "image", "file": path, "x": 1380, "y": 80,
-                                     "w": 460, "h": 460, "start": 0, "end": 4,
-                                     "fade_in": 0.3, "fade_out": 0.3})
-        self.selected_layer = len(self.scene["layers"]) - 1
-        self._scene_redraw()
+        self.scene_tab._scene_add_image()
 
     def _scene_add_text(self) -> None:
-        self._scene_push()
-        self.scene["layers"].append({"type": "text", "text": "Novo texto", "x": 960, "y": 800,
-                                     "font_size": 64, "color": "#000000",
-                                     "start": 0, "end": 5, "fade": 0.3})
-        self.selected_layer = len(self.scene["layers"]) - 1
-        self._scene_redraw()
+        self.scene_tab._scene_add_text()
 
     def _scene_remove(self) -> None:
-        if self.selected_layer is None:
-            return
-        self._scene_push()
-        self.scene["layers"].pop(self.selected_layer)
-        self.selected_layer = None
-        self._scene_redraw()
+        self.scene_tab._scene_remove()
 
     def _scene_undo(self) -> None:
-        if not self.scene_history:
-            return
-        self.scene_future.append(copy.deepcopy(self.scene))
-        self.scene = self.scene_history.pop()
-        self._scene_redraw()
+        self.scene_tab._scene_undo()
 
     def _scene_redo(self) -> None:
-        if not self.scene_future:
-            return
-        self.scene_history.append(copy.deepcopy(self.scene))
-        self.scene = self.scene_future.pop()
-        self._scene_redraw()
+        self.scene_tab._scene_redo()
 
     def _scene_fx_dialog(self) -> None:
-        if self.selected_layer is None or self.selected_layer >= len(self.scene.get("layers", [])):
-            messagebox.showinfo(APP_NAME, "Selecione uma camada de imagem.")
-            return
-        layer = self.scene["layers"][self.selected_layer]
-        fx = dict(layer.get("fx") or {})
-        top = Toplevel(self.root)
-        top.title("Efeitos da imagem")
-        top.geometry("430x640")
-        row = 0
-        ttk.Label(top, text="Remover fundo").grid(row=row, column=0, sticky="w", padx=8, pady=6)
-        method = StringVar(value=str(fx.get("remove_background", "none")))
-        ttk.Combobox(top, state="readonly", textvariable=method,
-                     values=["none", "color", "luma", "saturation", "flood"]).grid(row=row, column=1, sticky="w")
-        row += 1
-        ttk.Label(top, text="Cor do fundo").grid(row=row, column=0, sticky="w", padx=8)
-        color = StringVar(value=str(fx.get("key_color", "#FFFFFF")))
-        ttk.Entry(top, textvariable=color, width=14).grid(row=row, column=1, sticky="w")
-        row += 1
-        scales: dict[str, DoubleVar] = {}
-        for key, label, low, high, default in (
-            ("tolerance", "Tolerância", 0.02, 0.9, 0.12),
-            ("feather", "Penumbra", 0, 8, 1.5),
-            ("brightness", "Brilho", 0, 3, 1),
-            ("contrast", "Contraste", 0, 3, 1),
-            ("saturation", "Saturação", 0, 3, 1),
-            ("sharpness", "Nitidez", 0, 3, 1),
-            ("blur", "Desfoque", 0, 10, 0),
-            ("opacity", "Opacidade", 0, 1, 1),
-            ("rotate", "Rotação", -180, 180, 0),
-        ):
-            ttk.Label(top, text=label).grid(row=row, column=0, sticky="w", padx=8)
-            var = DoubleVar(value=float(fx.get(key, default)))
-            scales[key] = var
-            Scale(top, from_=low, to=high, resolution=(high - low) / 100,
-                  orient="horizontal", variable=var, length=230).grid(row=row, column=1)
-            row += 1
-        checks: dict[str, BooleanVar] = {}
-        for key, label in (("grayscale", "Preto e branco"), ("sepia", "Sépia"),
-                           ("flip_h", "Espelhar"), ("flip_v", "Inverter"),
-                           ("shadow", "Sombra")):
-            var = BooleanVar(value=bool(fx.get(key, False)))
-            checks[key] = var
-            Checkbutton(top, text=label, variable=var).grid(row=row, column=1, sticky="w")
-            row += 1
-
-        def apply() -> None:
-            self._scene_push()
-            new_fx = {"remove_background": method.get(), "key_color": color.get()}
-            for key, var in scales.items():
-                new_fx[key] = round(float(var.get()), 3)
-            for key, var in checks.items():
-                new_fx[key] = bool(var.get())
-            layer["fx"] = new_fx
-            self._scene_redraw()
-            self._scene_preview()
-            top.destroy()
-
-        ttk.Button(top, text="Aplicar", style="Primary.TButton", command=apply).grid(
-            row=row, column=0, columnspan=2, pady=12)
+        self.scene_tab._scene_fx_dialog()
 
     def _scene_preview(self) -> None:
-        if not self.scene.get("layers"):
-            return
-        try:
-            from .scene import render_preview
-            background = Path(self.bg_var.get()) if self.bg_var.get().strip() else None
-            if not background or not background.is_file():
-                first = self.batch_list.get(0) if self.batch_list.size() else ""
-                if first:
-                    background = next((p for p in Path(first).parent.glob("FUNDO*")), None)
-            layer = (self.scene["layers"][self.selected_layer]
-                     if self.selected_layer is not None else self.scene["layers"][0])
-            time = float(layer.get("start", 0)) + 0.5
-            out = Path(tempfile.gettempdir()) / "vilm-scene-preview.png"
-            render_preview(scene=self.scene, background=background, time=time, output=out)
-            image = ImageTk.PhotoImage(Image.open(out))
-            self.preview_label.configure(image=image)
-            self.preview_label.image = image
-        except Exception as exc:
-            self._append_qc("PREVIA: " + str(exc))
+        self.scene_tab._scene_preview()
 
-    def _apply_language(self) -> None:
-        self.profile_label.configure(text=self.tr("profile"))
-        self.profile_info.configure(text=self.tr("profile_help") if not self.active_profile else (self.profiles.get("profiles", {}).get(self.active_profile, {}).get("description") or self.tr("profile_help")))
-        self.media_label.configure(text=self.tr("media"))
-        self.media_hint.configure(text=self.tr("drop"))
-        self.browse_button.configure(text=self.tr("browse"))
-        if self.media_path is None:
-            self.media_name.configure(text=self.tr("no_media"))
-        self.range_label.configure(text=self.tr("range"))
-        self.full_radio.configure(text=self.tr("full"))
-        self.selection_radio.configure(text=self.tr("selection"))
-        self.range_hint.configure(text=self.tr("range_help"))
-        self.lyrics_label.configure(text=self.tr("lyrics"))
-        self.lyrics_hint.configure(text=self.tr("lyrics_hint"))
-        self.load_button.configure(text=self.tr("load"))
-        self.mode_label.configure(text=self.tr("mode"))
-        current_mode = self.mode_box.current()
-        self.mode_box.configure(values=[self.tr("auto"), self.tr("manual")])
-        self.mode_box.current(max(0, current_mode))
-        self.device_label.configure(text=self.tr("device"))
-        self.max_chars_label.configure(text=self.tr("max_chars"))
-        self.max_duration_label.configure(text=self.tr("max_duration"))
-        self.end_hold_label.configure(text=self.tr("end_hold"))
-        self.guide.configure(text=self.tr("guide"))
-        self.generate_button.configure(text=self.tr("generate"))
-        self.cancel_button.configure(text=self.tr("cancel"))
-        self.open_folder_button.configure(text=self.tr("open_folder"))
-        if not self.worker or not self.worker.is_alive():
-            self.status.configure(text=self.tr("ready"))
+    def _set_language_text(self, widget, key: str) -> None:
+        """Assign a translated text and register the widget for retranslation."""
+        widget.configure(text=t(key))
+        mark_widget(widget, key)
+
+    def _sync_language_box(self) -> None:
+        codes = available_languages()
+        if self.language in codes:
+            self.language_box.current(codes.index(self.language))
+
+    def _apply_language(self, _lang: str | None = None) -> None:
+        """Reassign Karaoke tab labels.  Registered as a retranslation hook.
+
+        It never changes the global language and never writes settings: that
+        is the job of the single funnel (``VilmTkApp.apply_language`` when
+        embedded, ``DesktopApp.apply_language`` when standalone).
+        """
+        if _lang in available_languages():
+            self.language = _lang
+        self._sync_language_box()
+        self.production_tab.refresh_language(_lang)
+        # Rotulos de cena e audio pertencem aos modulos; cada um reaplica os
+        # seus sem tocar na cena, na selecao ou nos valores digitados.
+        self.scene_tab.refresh_language()
+        self.audio_tab.refresh_language()
+
+    def apply_language(self, code: str) -> bool:
+        """Standalone equivalent of the shell funnel (one settings write)."""
+        if code not in available_languages():
+            return False
+        set_language(code)
+        self.language = code
+        self._save_preferences(ui_language=code)
+        self._sync_language_box()
+        retranslate(self.root)
+        self.set_status(t("language_saved", lang=language_label(code)))
+        return True
 
     def _language_changed(self, _event=None) -> None:
-        self.language = "en" if self.language_box.current() == 0 else "ko"
-        PREFERENCES_PATH.parent.mkdir(parents=True, exist_ok=True)
-        PREFERENCES_PATH.write_text(json.dumps({"ui_language": self.language}), encoding="utf-8")
-        self._apply_language()
+        codes = available_languages()
+        index = self.language_box.current()
+        code = codes[index] if 0 <= index < len(codes) else "pt"
+        funnel = getattr(self.parent, "apply_language", None) if self.embedded else None
+        if callable(funnel):
+            funnel(code)
+        else:
+            self.apply_language(code)
 
+    # ---- midia/faixa/letra/SRT: wrappers de producao -------------------
     def _browse_media(self) -> None:
-        selected = filedialog.askopenfilename(
-            title=self.tr("browse"),
-            filetypes=[
-                ("Media", "*.mp4 *.mov *.mkv *.avi *.m4a *.aac *.mp3 *.wav *.flac *.ogg *.opus *.webm"),
-                ("All files", "*.*"),
-            ],
-        )
-        if selected:
-            self._load_media(Path(selected))
+        self.production_tab._browse_media()
 
     def _load_media(self, path: Path) -> None:
-        self.media_path = path
-        self.media_name.configure(text=path.name)
-        self.status.configure(text=self.tr("loading"))
-        self.peaks = []
-        self._draw_waveform()
-        threading.Thread(target=self._waveform_worker, args=(path,), daemon=True).start()
+        self.production_tab._load_media(path)
 
     def _waveform_worker(self, path: Path) -> None:
-        try:
-            duration, peaks = waveform_peaks(path, bins=900)
-            self.events.put(("waveform", (path, duration, peaks)))
-        except Exception as exc:
-            self.events.put(("media_error", (path, str(exc))))
+        self.production_tab._waveform_worker(path)
 
     def _range_mode_changed(self) -> None:
-        if self.range_mode.get() == "full":
-            self.range_start = 0.0
-            self.range_end = self.duration
-        self._update_range_readout()
-        self._draw_waveform()
+        self.production_tab._range_mode_changed()
 
     def _wave_press(self, event) -> None:
-        if self.duration <= 0:
-            return
-        self.range_mode.set("selection")
-        self.drag_start_x = float(event.x)
-        position = self._x_to_time(event.x)
-        self.range_start = position
-        self.range_end = position
-        self._draw_waveform()
+        self.production_tab._wave_press(event)
 
     def _wave_drag(self, event) -> None:
-        if self.drag_start_x is None or self.duration <= 0:
-            return
-        first = self._x_to_time(self.drag_start_x)
-        second = self._x_to_time(event.x)
-        self.range_start, self.range_end = sorted((first, second))
-        self._update_range_readout()
-        self._draw_waveform()
+        self.production_tab._wave_drag(event)
 
     def _wave_release(self, event) -> None:
-        self._wave_drag(event)
-        self.drag_start_x = None
+        self.production_tab._wave_release(event)
 
     def _x_to_time(self, x: float) -> float:
-        width = max(1, self.waveform.winfo_width())
-        return max(0.0, min(self.duration, float(x) / width * self.duration))
+        return self.production_tab._x_to_time(x)
 
     def _draw_waveform(self) -> None:
-        canvas = self.waveform
-        canvas.delete("all")
-        width = max(1, canvas.winfo_width())
-        height = max(1, canvas.winfo_height())
-        middle = height / 2
-        if self.peaks:
-            step = width / len(self.peaks)
-            for index, peak in enumerate(self.peaks):
-                x = index * step
-                amplitude = max(1.0, peak * (height * 0.44))
-                canvas.create_line(x, middle - amplitude, x, middle + amplitude, fill="#79d8a5")
-        if self.duration > 0 and self.range_mode.get() == "selection":
-            left = self.range_start / self.duration * width
-            right = self.range_end / self.duration * width
-            canvas.create_rectangle(0, 0, left, height, fill="#101318", stipple="gray50", outline="")
-            canvas.create_rectangle(right, 0, width, height, fill="#101318", stipple="gray50", outline="")
-            canvas.create_line(left, 0, left, height, fill="#ffd166", width=2)
-            canvas.create_line(right, 0, right, height, fill="#ffd166", width=2)
+        self.production_tab._draw_waveform()
 
     def _update_range_readout(self) -> None:
-        end = self.duration if self.range_mode.get() == "full" else self.range_end
-        start = 0.0 if self.range_mode.get() == "full" else self.range_start
-        self.range_readout.configure(text=f"{_format_time(start)} — {_format_time(end)}")
+        self.production_tab._update_range_readout()
 
     def _load_lyrics(self) -> None:
-        selected = filedialog.askopenfilename(title=self.tr("load"), filetypes=[("Text", "*.txt"), ("All files", "*.*")])
-        if selected:
-            text = Path(selected).read_text(encoding="utf-8-sig")
-            self.lyrics.delete("1.0", END)
-            self.lyrics.insert("1.0", text)
+        self.production_tab._load_lyrics()
 
     def _update_manual_visibility(self) -> None:
-        if self.mode_box.current() == 1:
-            self.manual_frame.pack(fill=X, pady=(8, 0), before=self.guide)
-        else:
-            self.manual_frame.pack_forget()
+        self.production_tab._update_manual_visibility()
 
     def _selected_device(self) -> str:
-        if self.backend in {"cuda", "mps"} and self.device_box.current() == 0:
-            return self.backend
-        return "cpu"
+        return self.production_tab._selected_device()
 
     def _generate(self) -> None:
-        if self.worker and self.worker.is_alive():
-            return
-        if self.media_path is None or not self.media_path.is_file():
-            messagebox.showinfo(APP_NAME, self.tr("need_media"))
-            return
-        lyrics = self.lyrics.get("1.0", END).strip()
-        if not lyrics:
-            messagebox.showinfo(APP_NAME, self.tr("need_lyrics"))
-            return
-        selected = self.range_mode.get() == "selection"
-        if selected and self.range_end - self.range_start < 1.0:
-            messagebox.showinfo(APP_NAME, self.tr("bad_range"))
-            return
-        output_dir = Path.home() / "Documents" / APP_NAME
-        output_dir.mkdir(parents=True, exist_ok=True)
-        default_name = f"{self.media_path.stem}-{datetime.now():%Y%m%d-%H%M%S}.srt"
-        output = filedialog.asksaveasfilename(
-            title=self.tr("save_title"),
-            initialdir=str(output_dir),
-            initialfile=default_name,
-            defaultextension=".srt",
-            filetypes=[("SubRip subtitles", "*.srt")],
-        )
-        if not output:
-            return
+        self.production_tab._generate()
 
-        handle, lyrics_name = tempfile.mkstemp(prefix="vilm-lyrics-", suffix=".txt")
-        os.close(handle)
-        lyrics_path = Path(lyrics_name)
-        lyrics_path.write_text(lyrics, encoding="utf-8")
-        self.cancel_event.clear()
-        self.last_output = None
-        self.generate_button.pack_forget()
-        self.cancel_button.pack(side=RIGHT)
-        self.open_folder_button.pack_forget()
-        self.progress.start(12)
-        self.status.configure(text=self.tr("processing"))
-        self._set_log("")
-        options = {
-            "max_chars": self.max_chars.get(),
-            "max_duration": self.max_duration.get(),
-            "end_hold_index": self.end_hold.current(),
-            "lead_ms": self.lead_ms,
-            "automatic": self.mode_box.current() == 0,
-            "device": self._selected_device(),
-            "range_start": self.range_start,
-            "range_end": self.range_end,
-        }
-        self.worker = threading.Thread(
-            target=self._alignment_worker,
-            args=(lyrics_path, Path(output), selected, options),
-            daemon=True,
-        )
-        self.worker.start()
-
-    def _alignment_worker(self, lyrics_path: Path, output: Path, selected: bool, options: dict) -> None:
-        assert self.media_path is not None
-        python = Path(sys.executable)
-        if python.name.casefold() == "pythonw.exe":
-            console_python = python.with_name("python.exe")
-            if console_python.is_file():
-                python = console_python
-        command = [
-            str(python), "-m", "lyrics_aligner", "align",
-            str(self.media_path), str(lyrics_path), "-o", str(output),
-            "--max-chars", str(options["max_chars"]),
-            "--lead-ms", str(int(options["lead_ms"])),
-            "--max-duration-ms", str(int(options["max_duration"]) * 1000),
-            "--end-pad-ms", str([300, 500, 1000, 1500][int(options["end_hold_index"])]),
-            "--min-gap-ms", "80",
-            "--timeline-anchor",
-        ]
-        if options["automatic"]:
-            command.append("--auto-segment")
-        if selected:
-            command.extend([
-                "--range-start", f"{float(options['range_start']):.6f}",
-                "--range-end", f"{float(options['range_end']):.6f}",
-                "--partial-range",
-            ])
-        env = os.environ.copy()
-        env["PYTHONPATH"] = str(VILM_APP_PATH)
-        env["PYTHONIOENCODING"] = "utf-8"
-        env["LYRICS_ALIGNER_DEVICE"] = str(options["device"])
-        try:
-            result = run_streaming_process(
-                command,
-                env=env,
-                cancel_requested=self.cancel_event.is_set,
-                on_output=lambda line: self.events.put(("log", line)),
-            )
-            if result.returncode != 0:
-                raise RuntimeError(result.output.strip() or "Alignment failed")
-            self.events.put(("complete", output))
-        except JobCancelled:
-            output.unlink(missing_ok=True)
-            self.events.put(("cancelled", None))
-        except Exception as exc:
-            output.unlink(missing_ok=True)
-            self.events.put(("failed", str(exc)))
-        finally:
-            lyrics_path.unlink(missing_ok=True)
+    def _alignment_worker(self, lyrics_path: Path, output: Path,
+                          selected: bool, options: dict) -> None:
+        self.production_tab._alignment_worker(lyrics_path, output, selected, options)
 
     def _cancel(self) -> None:
-        self.cancel_event.set()
-        self.status.configure(text=f"{self.tr('cancelled')}…")
+        self.production_tab._cancel()
 
     def _poll_events(self) -> None:
         try:
             while True:
                 kind, payload = self.events.get_nowait()
                 if kind == "waveform":
-                    path, duration, peaks = payload
-                    if self.media_path == path:
-                        self.duration = float(duration)
-                        self.peaks = list(peaks)
-                        self.range_start = 0.0
-                        self.range_end = self.duration
-                        self.range_mode.set("full")
-                        self._update_range_readout()
-                        self._draw_waveform()
-                        self.status.configure(text=self.tr("ready"))
+                    self.production_tab._on_waveform(payload)
                 elif kind == "media_error":
-                    path, error = payload
-                    if self.media_path == path:
-                        self.media_path = None
-                        self.media_name.configure(text=self.tr("no_media"))
-                        self.status.configure(text=self.tr("ready"))
-                        messagebox.showerror(self.tr("file_error"), error)
+                    self.production_tab._on_media_error(payload)
                 elif kind == "log":
-                    self._append_log(str(payload))
+                    self.production_tab._on_log(payload)
                 elif kind == "complete":
-                    self.last_output = Path(payload)
-                    self.status.configure(text=f"{self.tr('done')}  {self.last_output}")
-                    self._finish_job(show_folder=True)
+                    self.production_tab._on_complete(payload)
                 elif kind == "cancelled":
-                    self.status.configure(text=self.tr("cancelled"))
-                    self._finish_job()
+                    self.production_tab._on_cancelled(payload)
                 elif kind == "failed":
-                    self.status.configure(text=self.tr("failed"))
-                    self._finish_job()
-                    messagebox.showerror(self.tr("failed"), str(payload))
+                    self.production_tab._on_failed(payload)
                 elif kind == "batch_status":
-                    self.status.configure(text=str(payload))
-                    self._append_log(str(payload))
+                    self.production_tab._on_batch_status(payload)
                 elif kind == "qc":
-                    self._append_qc(str(payload))
+                    self.production_tab._on_qc(payload)
                 elif kind == "batch_done":
-                    self.status.configure(text="Lote concluído.")
-                    self._append_qc("— fim do lote —")
+                    self.production_tab._on_batch_done(payload)
+                elif kind == "audio_log":
+                    self._audio_append_log(str(payload))
+                elif kind == "audio_done":
+                    text = str(payload or "").strip()
+                    if text:
+                        self._audio_append_log(text)
+                    self._audio_finish()
+                elif kind == "audio_cancelled":
+                    self.set_status(t("cancelled"))
+                    self._audio_finish(status=t("cancelled"))
         except queue.Empty:
             pass
         self.root.after(100, self._poll_events)
 
     def _finish_job(self, show_folder: bool = False) -> None:
-        self.progress.stop()
-        self.cancel_button.pack_forget()
-        if show_folder:
-            self.open_folder_button.pack(side=RIGHT, padx=(0, 8))
-        self.generate_button.pack(side=RIGHT)
+        self.production_tab._finish_job(show_folder)
 
     def _set_log(self, text: str) -> None:
-        self.log.configure(state="normal")
-        self.log.delete("1.0", END)
-        if text:
-            self.log.insert(END, text)
-        self.log.configure(state="disabled")
+        self.production_tab._set_log(text)
 
     def _append_log(self, text: str) -> None:
-        self.log.configure(state="normal")
-        self.log.insert(END, text + "\n")
-        self.log.see(END)
-        self.log.configure(state="disabled")
+        self.production_tab._append_log(text)
+
+    def _format_time(self, seconds: float) -> str:
+        return self.production_tab._format_time(seconds)
+
+    def _result_value(self, result, key: str, default=None):
+        return self.production_tab._result_value(result, key, default)
 
     def _open_output_folder(self) -> None:
-        if self.last_output is None:
-            return
-        folder = str(self.last_output.parent)
-        if os.name == "nt":
-            os.startfile(folder)
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", folder])
-        else:
-            subprocess.Popen(["xdg-open", folder])
+        self.production_tab._open_output_folder()
+
 
 
 def main() -> int:

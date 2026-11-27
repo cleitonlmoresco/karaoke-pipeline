@@ -71,7 +71,8 @@ def normalize(media: str | Path, output: str | Path, *, lufs: float = -16.0,
     return output
 
 
-def enhance(media: str | Path, output: str | Path, *, preset: str = "voz") -> Path:
+def enhance(media: str | Path, output: str | Path, *, preset: str = "voz",
+            lufs: float = -16.0) -> Path:
     """Melhora clareza: corte de grave, presence EQ, compressao e loudness."""
     output = Path(output); output.parent.mkdir(parents=True, exist_ok=True)
     if preset == "musica":
@@ -81,7 +82,7 @@ def enhance(media: str | Path, output: str | Path, *, preset: str = "voz") -> Pa
         eq = "highpass=f=75,equalizer=f=3000:t=q:w=1:g=2.5,equalizer=f=8000:t=q:w=1:g=1.5"
         comp = "acompressor=threshold=-18dB:ratio=3:attack=20:release=150"
     _run([FFMPEG, "-y", "-loglevel", "error", "-i", media,
-          "-af", f"{eq},{comp},loudnorm=I=-16:TP=-1.5:LRA=11",
+          "-af", f"{eq},{comp},loudnorm=I={float(lufs):g}:TP=-1.5:LRA=11",
           "-c:a", "pcm_s16le", str(output)])
     return output
 
@@ -115,6 +116,8 @@ def apply_audio_fx(media: str | Path, output: str | Path, fx: dict,
     work.mkdir(parents=True, exist_ok=True)
     current = media
     step = 0
+    lufs_value = float(fx.get("lufs", -16.0))
+    lufs: float | int = int(lufs_value) if lufs_value.is_integer() else lufs_value
     if float(fx.get("denoise", 0)) > 0:
         step += 1
         current = denoise(current, work / f"step{step}.wav",
@@ -122,10 +125,10 @@ def apply_audio_fx(media: str | Path, output: str | Path, fx: dict,
     if fx.get("enhance"):
         step += 1
         current = enhance(current, work / f"step{step}.wav",
-                          preset=str(fx.get("enhance_preset", "voz")))
+                          preset=str(fx.get("enhance_preset", "voz")), lufs=lufs)
     if fx.get("normalize"):
         step += 1
-        current = normalize(current, work / f"step{step}.wav")
+        current = normalize(current, work / f"step{step}.wav", lufs=lufs)
     wants_mix = (fx.get("instrumental")
                  or abs(float(fx.get("voice_gain", 1.0)) - 1.0) > 1e-6
                  or abs(float(fx.get("music_gain", 1.0)) - 1.0) > 1e-6)

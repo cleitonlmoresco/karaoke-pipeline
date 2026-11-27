@@ -12,6 +12,7 @@ from .karaoke import (
     stanza_boundaries_from_lyrics,
 )
 from .karaoke_jobs import load_profiles, run_project
+from .profiles_api import profile_settings as profile_settings_by_name
 from .scene import compile_scene, load_scene, validate_scene
 from .audiofx import analyze, apply_audio_fx
 from .media import waveform_peaks
@@ -45,6 +46,87 @@ def _add_alignment_options(command: argparse.ArgumentParser) -> None:
     command.add_argument("--max-duration-ms", type=int, default=10000)
     command.add_argument("--min-gap-ms", type=int, default=80)
     command.add_argument("--debug-json", type=Path)
+
+
+# Nomes de flags do comando ``align`` que controlam o alinhamento.  Usados
+# para detectar o que foi passado explicitamente na linha de comando: um perfil
+# so preenche o que o chamador nao escolheu.
+_ALIGNMENT_FLAGS: dict[str, str] = {
+    "max_chars": "--max-chars",
+    "auto_segment": "--auto-segment",
+    "language": "--language",
+    "model_name": "--model",
+    "separate": "--no-separate",
+    "partial_range": "--partial-range",
+    "lead_ms": "--lead-ms",
+    "offset_seconds": "--offset-seconds",
+    "range_start_seconds": "--range-start",
+    "range_end_seconds": "--range-end",
+    "timeline_anchor": "--timeline-anchor",
+    "end_pad_ms": "--end-pad-ms",
+    "min_duration_ms": "--min-duration-ms",
+    "max_duration_ms": "--max-duration-ms",
+    "min_gap_ms": "--min-gap-ms",
+}
+
+# kwarg de align_to_srt -> (chave em settings["alignment"], conversor)
+_PROFILE_ALIGNMENT_KEYS: dict[str, tuple[str, Any]] = {
+    "max_chars": ("max_chars", int),
+    "auto_segment": ("mode", lambda value: str(value) != "manual"),
+    "language": ("language", str),
+    "model_name": ("model", str),
+    "separate": ("separate", bool),
+    "lead_ms": ("lead_ms", int),
+    "offset_seconds": ("offset_seconds", float),
+    "range_start_seconds": ("range_start", float),
+    "range_end_seconds": ("range_end", lambda value: None if value is None else float(value)),
+    "end_pad_ms": ("end_pad_ms", int),
+    "min_duration_ms": ("min_duration_ms", int),
+    "max_duration_ms": ("max_duration_ms", int),
+    "min_gap_ms": ("min_gap_ms", int),
+}
+
+
+def _explicit_alignment_flags(argv: list[str]) -> set[str]:
+    """Flags de alinhamento presentes literalmente em ``argv``."""
+    tokens = set(argv)
+    found = set()
+    for flag in _ALIGNMENT_FLAGS.values():
+        if flag in tokens or any(token.startswith(flag + "=") for token in tokens):
+            found.add(flag)
+    return found
+
+
+def _alignment_kwargs(args: argparse.Namespace, argv: list[str]) -> dict[str, Any]:
+    """Kwargs de ``align_to_srt``, com perfil como base e CLI por cima."""
+    kwargs: dict[str, Any] = {
+        "max_chars": args.max_chars,
+        "auto_segment": args.auto_segment,
+        "language": args.language,
+        "separate": not args.no_separate,
+        "partial_range": args.partial_range,
+        "model_name": args.model,
+        "lead_ms": args.lead_ms,
+        "offset_seconds": args.offset_seconds,
+        "range_start_seconds": args.range_start,
+        "range_end_seconds": args.range_end,
+        "timeline_anchor": args.timeline_anchor,
+        "end_pad_ms": args.end_pad_ms,
+        "min_duration_ms": args.min_duration_ms,
+        "max_duration_ms": args.max_duration_ms,
+        "min_gap_ms": args.min_gap_ms,
+        "debug_json": args.debug_json,
+    }
+    profile_name = getattr(args, "profile", None)
+    if not profile_name:
+        return kwargs
+    profile_align = profile_settings_by_name(profile_name).get("alignment") or {}
+    explicit = _explicit_alignment_flags(argv)
+    for kwarg, (key, convert) in _PROFILE_ALIGNMENT_KEYS.items():
+        if _ALIGNMENT_FLAGS[kwarg] in explicit or key not in profile_align:
+            continue
+        kwargs[kwarg] = convert(profile_align[key])
+    return kwargs
 
 
 def _add_ass_style_options(command: argparse.ArgumentParser) -> None:
@@ -96,6 +178,10 @@ def build_parser() -> argparse.ArgumentParser:
     audio_command.add_argument("--normalize", action="store_true")
     audio_command.add_argument("--analyze", action="store_true",
                                help="only print audio metrics")
+    audio_command.add_argument(
+        "--lufs", type=float, default=-16.0,
+        help="target loudness (LUFS) for --normalize/--enhance (default: -16.0)",
+    )
 
     make_command = subparsers.add_parser(
         "make", help="generate a full karaoke MP4 using a saved profile"
@@ -128,6 +214,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     align = subparsers.choices["align"]
     _add_alignment_options(align)
+    align.add_argument(
+        "--profile",
+        help="apply the alignment settings of a saved karaoke profile",
+    )
     align.add_argument(
         "--work-dir",
         type=Path,
@@ -356,7 +446,8 @@ def _run_karaoke(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    effective_argv = list(sys.argv[1:] if argv is None else argv)
+    args = build_parser().parse_args(effective_argv)
     try:
         if args.command == "karaoke":
             return _run_karaoke(args)
@@ -369,6 +460,7 @@ def main(argv: list[str] | None = None) -> int:
                 "voice_gain": args.voice_gain,
                 "music_gain": args.music_gain,
                 "instrumental": args.mode == "instrumental",
+                "lufs": args.lufs,
             }
             if args.denoise > 0:
                 fx["denoise"] = args.denoise
@@ -442,22 +534,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.audio,
                 lyrics_text,
                 args.output,
-                max_chars=args.max_chars,
-                auto_segment=args.auto_segment,
-                language=args.language,
-                separate=not args.no_separate,
-                partial_range=args.partial_range,
-                model_name=args.model,
-                lead_ms=args.lead_ms,
-                offset_seconds=args.offset_seconds,
-                range_start_seconds=args.range_start,
-                range_end_seconds=args.range_end,
-                timeline_anchor=args.timeline_anchor,
-                end_pad_ms=args.end_pad_ms,
-                min_duration_ms=args.min_duration_ms,
-                max_duration_ms=args.max_duration_ms,
-                min_gap_ms=args.min_gap_ms,
-                debug_json=args.debug_json,
+                **_alignment_kwargs(args, effective_argv),
                 messages=messages,
                 progress=lambda message: print(message, flush=True),
                 work_dir=args.work_dir,

@@ -4,6 +4,9 @@ Usa apenas PIL/numpy/scipy, ja incluidos no Vilm (sem download de modelos).
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -147,3 +150,46 @@ def process_image(source: str | Path, output: str | Path, fx: dict) -> Path:
     image = apply_adjustments(image, fx)
     image.save(output)
     return output
+
+
+# Mudanca de formato de chave: incrementar invalida entradas antigas.
+CACHE_KEY_VERSION = 1
+
+
+def _cache_key(source: Path, fx: dict) -> str:
+    """SHA256 da origem resolvida + mtime_ns + tamanho + fx canonico + versao."""
+    stat = source.stat()
+    payload = {
+        "source": str(Path(source).resolve()),
+        "mtime_ns": stat.st_mtime_ns,
+        "size": stat.st_size,
+        "fx": fx,
+        "version": CACHE_KEY_VERSION,
+    }
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                     separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def cached_process_image(source: str | Path, output: str | Path, fx: dict, *,
+                         cache_dir: str | Path) -> Path:
+    """Processa a imagem no maximo uma vez por (arquivo, mtime, tamanho, fx).
+
+    ``output`` faz parte da API publica; o arquivo reaproveitado fica em
+    ``cache_dir/<digest[:16]>.png``. A gravacao e atomica (temp + os.replace),
+    entao uma falha nunca corrompe uma entrada ja existente.
+    """
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    digest = _cache_key(Path(source), fx if isinstance(fx, dict) else {})
+    cached = cache_dir / f"{digest[:16]}.png"
+    if cached.is_file():
+        return cached
+    temp = cache_dir / f".{digest[:16]}.{os.getpid()}.tmp.png"
+    try:
+        process_image(source, temp, fx)
+        os.replace(temp, cached)
+    finally:
+        if temp.exists():
+            temp.unlink(missing_ok=True)
+    return cached

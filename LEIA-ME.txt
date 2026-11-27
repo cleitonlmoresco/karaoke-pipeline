@@ -1,0 +1,142 @@
+﻿VILM PIPELINE - VIDEOS KARAOKE
+===============================
+Documentacao do estado atual - 27/11/2026
+Interface desktop Tk nativa (sem pagina web e sem icone de notificacao).
+
+-----------------------------------------------------------------------
+1. O QUE E ESTE PROGRAMA
+-----------------------------------------------------------------------
+O Vilm Pipeline e um aplicativo de area de trabalho feito em Tkinter.
+Ele alinha a letra de hinos com a musica cantada e gera videos karaoke
+com legenda progressiva, fundo, playback instrumental opcional, cena
+de imagens/texto e acabamentos de audio.
+Todo o processamento e local: Whisper, Demucs e FFmpeg estao incluidos
+na instalacao. Nao e preciso instalar mais nada nem usar internet.
+
+-----------------------------------------------------------------------
+2. COMO ABRIR
+-----------------------------------------------------------------------
+Clique no atalho "Vilm Lyrics Aligner" da area de trabalho (OneDrive).
+Esse atalho chama o Windows Script Host (wscript.exe) sobre o arquivo
+iniciar_tk.vbs, que ajusta PYTHONPATH=app e abre a janela Tk.
+O grupo "Vilm Pipeline" no Menu Iniciar e historico da instalacao anterior
+(contem o atalho de desinstalacao); o caminho atual de uso e o atalho
+"Vilm Lyrics Aligner".
+Para fechar: use o menu Arquivo > Sair ou o botao de fechar da janela.
+
+-----------------------------------------------------------------------
+3. CABECALHO FIXO: PROJETO / PERFIL / IDIOMA
+-----------------------------------------------------------------------
+Acima das abas ha tres seletores sempre visiveis:
+  Projeto  - a pasta do hino ativo (descoberta automaticamente).
+  Perfil   - o pre-set de estilo, tempo e acabamento.
+  Idioma   - Portugues / English / Coreano.
+Trocar qualquer um deles atualiza as abas na hora. O perfil ativo e o
+idioma ficam salvos para a proxima abertura.
+
+-----------------------------------------------------------------------
+4. AS 7 ABAS (NESTA ORDEM)
+-----------------------------------------------------------------------
+  1. Projetos      - lista de pastas de hino, abrir/criar e status.
+  2. Producao      - midia, letra, faixa, alinhamento, Gerar SRT,
+                     Gerar video, lote, QC e historico.
+  3. Legendas      - rotulo atual "Editor de cues": tabela inicio/fim/
+                     texto, undo/redo e re-sintese do ASS.
+  4. Cena          - canvas, camadas de imagem/texto, timeline,
+                     propriedades, efeitos e resolucao.
+  5. Audio         - analisar, instrumental, voz +/-, ruido e loudness.
+  6. Configuracoes - ajustes de alinhamento/estilo/saida e CRUD de perfis.
+  7. Assistente    - refrao, ortografia e traducao.
+
+Producao, Cena e Audio sao construidas sob demanda (lazy) quando a aba
+e selecionada; as outras quatro ja vem prontas na abertura.
+Sao 7 abas planas, todas na mesma janela, sem segunda janela e sem
+nivel oculto.
+
+Limitacoes honestas: a previa da aba Producao usa frases de exemplo
+fixas, nao a letra do projeto; a previa da aba Cena, sim, mostra o texto
+das camadas. Nao ha uma suite automatica de testes da interface.
+
+-----------------------------------------------------------------------
+5. PROJETO = PASTA + projeto.json (ADITIVO)
+-----------------------------------------------------------------------
+Um projeto e uma pasta de hino. O programa descobre o conteudo pela
+convencao ja existente e grava um projeto.json dentro da pasta.
+Nada e apagado ou renomeado: letra.txt, FUNDO*, PLAYBACK*,
+imagem de titulo, saida\ e trabalho\ continuam onde estao.
+O projeto.json e mesclado (aditivo): chaves antigas do webapp e campos
+novos convivem no mesmo arquivo. Ao abrir uma pasta antiga sem o JSON,
+um arquivo minimo e criado sem tocar nos demais arquivos.
+
+-----------------------------------------------------------------------
+6. PERFIS (PRE-SETS) EDITAVEIS
+-----------------------------------------------------------------------
+Perfis ficam em profiles.json na raiz da instalacao.
+Na aba Configuracoes ha: Novo, Duplicar, Salvar ajustes neste perfil,
+Excluir e Salvar/Restaurar preferencias do aplicativo, alem de um
+painel "o que este perfil muda".
+O seletor do cabecalho troca o perfil ativo. Os dois perfis historicos
+festa-ibuc e festa-genesis permanecem disponiveis.
+Perfil nao e projeto: ele nao guarda midia nem letra, so estilo, tempo
+e acabamento de um evento.
+
+-----------------------------------------------------------------------
+7. REGRAS DE TEMPO REAIS
+-----------------------------------------------------------------------
+  Inicio antecipado (lead_ms) ............ 600 ms
+  Permanencia final (end_pad_ms) ......... 500 ms
+  Intervalo curto (< 1100 ms) ............ 40% para o fim do verso
+                                           anterior e 60% para o inicio
+                                           antecipado do proximo verso
+  Maximo de caracteres por linha ......... 30 no perfil festa-ibuc
+                                           (festa-genesis usa 50)
+  Duracao minima / maxima ................ 500 ms / 10000 ms
+  Intervalo minimo entre cues ............ 80 ms
+  Agrupamento em slides .................. ate 6 s ou quebra por estrofe
+  Preenchimento da letra ................. \kf (suave)
+
+Esses valores vem do perfil ativo e podem ser ajustados na aba
+Configuracoes. O perfil e aplicado ao gerar SRT e ao gerar o video.
+
+-----------------------------------------------------------------------
+8. ONDE OS ARQUIVOS SAO GRAVADOS E COMO FICA O QC
+-----------------------------------------------------------------------
+Dentro da pasta do projeto:
+  saida\<nome>.mp4              - video principal (cantado)
+  saida\<nome> - playback.mp4   - video do playback, quando ha PLAYBACK*
+  saida\lyrics.srt              - legenda alinhada (caminho padrao do
+                                  servico de alinhamento)
+  history.csv                   - historico de geracoes e avisos
+  trabalho\qc.json              - relatorio de QC/preflight
+  trabalho\cli\                 - ASS, SRT e arquivos intermediarios
+  trabalho\scene-autosave.json  - autosave da cena daquele projeto
+
+O QC AVISA, NAO BLOQUEIA: canto sem legenda, pausa instrumental longa
+e avisos de cena aparecem no log e no painel, e a geracao continua.
+Se nao houver projeto associado, o autosave de cena usa o arquivo
+global legado em %LOCALAPPDATA%\LyricsAligner\scene-autosave.json.
+
+-----------------------------------------------------------------------
+9. IDIOMA DA INTERFACE
+-----------------------------------------------------------------------
+Portugues, Ingles e Coreano, com 492 chaves em cada idioma.
+A troca pelo cabecalho usa um unico funil: valida o codigo, aplica o
+idioma global, grava a preferencia e redesenha todas as abas na hora.
+Nao ha mais dois sistemas de traducao independentes.
+
+-----------------------------------------------------------------------
+10. LINHA DE COMANDO (OPCIONAL)
+-----------------------------------------------------------------------
+Use sempre o Python da instalacao e aponte para o codigo atual:
+
+  set PYTHONPATH=C:\Users\globaltec\AppData\Local\VilmPipeline\app
+  python -m lyrics_aligner profiles
+  python -m lyrics_aligner make "hino.mp4" "letra.txt" -o "saida\hino.mp4" --profile festa-ibuc
+
+Sao 8 subcomandos: align, audio, demo, karaoke, make, profiles,
+publish e waveform. Sem PYTHONPATH, o Python pode carregar a copia
+antiga que esta em python\Lib\site-packages; por isso a variavel e
+obrigatoria fora do atalho.
+
+Para desinstalar: Menu Iniciar > Vilm Pipeline > Desinstalar Vilm
+Pipeline, ou Configuracoes do Windows > Aplicativos > Vilm Pipeline.

@@ -46,30 +46,37 @@ DEFAULT_BACKGROUND: dict[str, Any] = {
 
 
 def load_profiles() -> dict:
-    try:
-        data = json.loads(PROFILES_PATH.read_text(encoding="utf-8"))
-        if isinstance(data.get("profiles"), dict):
-            return data
-    except (OSError, ValueError):
-        pass
-    return {"active": None, "profiles": {}}
+    """Public compatibility wrapper; ``profiles_api`` owns profile I/O."""
+    from .profiles_api import load_profiles as _load_profiles
+
+    return _load_profiles()
 
 
 def save_profiles(payload: dict) -> None:
-    PROFILES_PATH.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+    """Public compatibility wrapper; keeps the historical ``None`` return."""
+    from .profiles_api import save_profiles as _save_profiles
+
+    _save_profiles(payload)
 
 
 def get_profile(name: str) -> dict:
-    data = load_profiles()
-    profile = data.get("profiles", {}).get(name)
-    if profile is None:
-        raise ValueError(f"Perfil '{name}' nao encontrado. Use 'profiles' para listar.")
-    return profile
+    from .profiles_api import get_profile as _get_profile
+
+    return _get_profile(name)
 
 
 def profile_settings(profile: dict) -> dict:
+    """Merge a profile's settings over the profile-oriented defaults.
+
+    ``profiles_api.profile_settings`` delegates dict inputs back to this
+    function, so the merge stays the canonical implementation.  A profile
+    *name* is delegated to ``profiles_api`` as the single data-layer entry
+    point.  ``run_project`` and ``make_style`` call the dict form unchanged.
+    """
+    if isinstance(profile, str):
+        from .profiles_api import profile_settings as _profile_settings
+
+        return _profile_settings(profile)
     raw = profile.get("settings") or {}
     return {
         "alignment": {**DEFAULT_ALIGNMENT, **(raw.get("alignment") or {})},
@@ -344,20 +351,40 @@ def run_project(
         say(f"Alinhamento reaproveitado ({len(cues)} versos).")
     else:
         say("Alinhando com Whisper + Demucs…")
-        messages: list[str] = []
-        cues = align_to_srt(
-            media, lyrics_text, srt,
-            max_chars=int(align["max_chars"]),
-            auto_segment=align["mode"] != "manual",
-            language=align["language"], separate=bool(align["separate"]),
-            model_name=align["model"], lead_ms=int(align["lead_ms"]),
-            end_pad_ms=int(align["end_pad_ms"]),
-            min_duration_ms=int(align["min_duration_ms"]),
-            max_duration_ms=int(align["max_duration_ms"]),
-            min_gap_ms=int(align["min_gap_ms"]),
-            debug_json=debug, messages=messages,
-            progress=lambda m: say(m),
+        from .services.align import generate_alignment
+
+        # O servico passa a ser o unico ponto de geracao de alinhamento.  Os
+        # caminhos historicos (work/lyrics.srt, work/alignment-debug.json) sao
+        # preservados, assim como o cache acima.
+        generated = generate_alignment(
+            project_dir=work.parent,
+            media=media,
+            lyrics_text=lyrics_text,
+            profile_name=profile_name,
+            output=srt,
+            work=work,
+            overrides={
+                "max_chars": int(align["max_chars"]),
+                "auto_segment": align["mode"] != "manual",
+                "language": align["language"],
+                "model_name": align["model"],
+                "separate": bool(align["separate"]),
+                "lead_ms": int(align["lead_ms"]),
+                "offset_seconds": float(align.get("offset_seconds", 0.0) or 0.0),
+                "range_start_seconds": float(align.get("range_start", 0.0) or 0.0),
+                "range_end_seconds": align.get("range_end"),
+                "end_pad_ms": int(align["end_pad_ms"]),
+                "min_duration_ms": int(align["min_duration_ms"]),
+                "max_duration_ms": int(align["max_duration_ms"]),
+                "min_gap_ms": int(align["min_gap_ms"]),
+            },
+            progress=say,
+            cancel_requested=cancel,
+            strict_qc=False,
         )
+        for warning in generated.get("warnings", []):
+            say("AVISO ALINHAMENTO: " + warning)
+        cues = parse_srt(srt.read_text(encoding="utf-8-sig"))
         say(f"Alinhado: {len(cues)} versos.")
     if cancel and cancel():
         return report
