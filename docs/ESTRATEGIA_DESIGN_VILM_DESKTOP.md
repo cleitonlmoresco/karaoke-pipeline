@@ -42,7 +42,7 @@
 - **Concluído em 27/11/2026:** documentação reescrita/criada
   (`LEIA-ME.txt`, `DESIGN_FUNCIONAL.md`, `INSTALACAO_E_MODULOS.md`,
   `LEIA-ME-Vilm.txt`) e erratas nos relatórios históricos.
-- **Não concluído / sem prova:** commit e push; suíte de testes automáticos.
+- **Concluído em 27/11/2026:** commit 7daf80e (Fases 0-4) e commit b484344 (remoção do webapp), ambos publicados em origin/master. **Não concluído / sem prova:** suíte de testes automáticos.
 
 ### Limitações que continuam abertas
 
@@ -476,7 +476,7 @@ inspect_ass, compare_versions, cross_check, diff_timelines, verify_frames`
 - [ ] CLI: `--profile` em `align`, saída padrão no projeto
 - [ ] Parcial em 27/11/2026: atalho `.lnk` criado; `.exe` em `python\Scripts\` ainda apontam para a cópia antiga
 - [x] Concluído em 27/11/2026: documentos reescritos/criados e erratas nos relatórios históricos
-- [ ] Não feito: commit + push (a interface única ainda está só na máquina local)
+- [x] Concluído em 27/11/2026: commit 7daf80e (Fases 0-4) e commit b484344 (remoção do webapp), ambos publicados em origin/master
 
 ---
 
