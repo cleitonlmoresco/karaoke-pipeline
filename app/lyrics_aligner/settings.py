@@ -23,7 +23,10 @@ Migration rules:
        the profile's OneDrive folder);
   chain: settings.json (destino) > config.json > desktop-preferences.json > webapp-config.json > .vilm_tkinter_config.json > profiles.json;
 * empty values (None, empty/whitespace strings, empty containers) never
-  overwrite a value that is already filled.
+  overwrite a value that is already filled; only NON-EMPTY on-disk values
+  count as filled, so a preference that appears later in a legacy file can
+  still be absorbed after the first save (an explicit clear of a slot whose
+  default is filled, such as ``theme: ""``, still wins).
 """
 
 from __future__ import annotations
@@ -118,14 +121,16 @@ def _read_json(path: Path) -> tuple[dict[str, Any], bool]:
     return (data if isinstance(data, dict) else {}), bom
 
 
-def _write_json(path: Path, payload: Mapping[str, Any], *, bom: bool = False) -> Path:
-    """Atomically replace the settings file, preserving BOM and bytes."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(dict(payload), ensure_ascii=False, indent=2) + "\n"
-    data = text.encode("utf-8")
-    if bom:
-        data = codecs.BOM_UTF8 + data
+def _read_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
 
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Replace ``path`` via temp file, fsync and atomic ``os.replace``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
     )
@@ -146,6 +151,36 @@ def _write_json(path: Path, payload: Mapping[str, Any], *, bom: bool = False) ->
         except OSError:
             pass
         raise
+
+
+def _same_payload(raw: bytes | None, payload: Mapping[str, Any]) -> bool:
+    """True when the destination already contains this JSON object."""
+    if raw is None:
+        return False
+    try:
+        current = json.loads(raw.decode("utf-8-sig"))
+    except (ValueError, UnicodeError):
+        return False
+    return isinstance(current, dict) and current == dict(payload)
+
+
+def _write_json(path: Path, payload: Mapping[str, Any], *, bom: bool = False) -> Path:
+    """Atomically replace the settings file only when its content changes.
+
+    The parsed payload and the exact bytes are compared first, so an
+    idempotent save neither rewrites the file nor bumps its mtime.  An
+    existing BOM and the UTF-8 encoding are preserved on a real change.
+    """
+    raw = _read_bytes(path)
+    if _same_payload(raw, payload):
+        return path
+    text = json.dumps(dict(payload), ensure_ascii=False, indent=2) + "\n"
+    data = text.encode("utf-8")
+    if bom or (raw is not None and raw.startswith(codecs.BOM_UTF8)):
+        data = codecs.BOM_UTF8 + data
+    if raw == data:
+        return path
+    _atomic_write_bytes(path, data)
     return path
 
 
@@ -159,18 +194,30 @@ def _present(value: Any) -> bool:
     return True
 
 
-def _sync_aliases(result: dict[str, Any]) -> None:
-    """Keep ``theme``/``tema`` equal without injecting defaults."""
+def _sync_aliases(result: dict[str, Any], *, explicit: Iterable[str] = ()) -> None:
+    """Keep ``theme``/``tema`` equal without injecting defaults.
+
+    A key explicitly present on disk wins even when its value is empty; the
+    other alias follows it instead of resurrecting a default.
+    """
+    named = set(explicit)
     theme = result.get("theme")
     tema = result.get("tema")
-    if _present(theme):
+    if "theme" in named:
+        result["tema"] = theme
+    elif "tema" in named:
+        result["theme"] = tema
+    elif _present(theme):
         result["tema"] = theme
     elif _present(tema):
         result["theme"] = tema
 
 
-def _normalize_aliases(result: dict[str, Any]) -> None:
-    _sync_aliases(result)
+def _normalize_aliases(result: dict[str, Any], *, explicit: Iterable[str] = ()) -> None:
+    named = set(explicit)
+    _sync_aliases(result, explicit=named)
+    if named & {"theme", "tema"}:
+        return
     if not _present(result.get("theme")) and not _present(result.get("tema")):
         result["theme"] = DEFAULT_SETTINGS["theme"]
         result["tema"] = DEFAULT_SETTINGS["theme"]
@@ -180,6 +227,8 @@ def _apply_legacy(
     result: dict[str, Any],
     on_disk_payload: Mapping[str, Any],
     sources: Mapping[str, Path],
+    *,
+    explicit: Iterable[str] = (),
 ) -> None:
     """Merge legacy values in explicit precedence order (highest first).
 
@@ -187,14 +236,22 @@ def _apply_legacy(
     2. ``config.json``; 3. ``desktop-preferences.json``;
     4. ``webapp-config.json``; 5. ``.vilm_tkinter_config.json``;
     6. ``profiles.json`` (lowest, including its ``projects_root``).
-    A lower source may only fill a key that is ABSENT from the destination;
-    a key explicitly present there (even with an empty value) is already
-    filled and is never replaced by a legacy source.
+    A lower source may only fill a key that has no USABLE value in the
+    destination.  Only non-empty values count as filled: after the first save
+    every DEFAULT_SETTINGS key exists on disk, so treating all present keys as
+    filled would freeze legacy sources forever.  A deliberately cleared slot
+    whose default is non-empty (e.g. ``theme: ""``) still wins as an explicit
+    value; default-empty slots (``profile``, ``projects_root``) stay open for
+    migration until a legacy or user value finally fills them.  Legacy empty
+    values never overwrite anything (see ``offer``).
     """
-    # Presence, not truthiness: an explicit "" or 0 in settings.json is a
-    # deliberate clear and must not be resurrected from a legacy file.
-    filled = set(on_disk_payload)
-    _sync_aliases(on_disk_payload)
+    default_empty = {k for k, v in DEFAULT_SETTINGS.items() if not _present(v)}
+    filled = {
+        key for key, value in on_disk_payload.items()
+        if _present(value) or key not in default_empty
+    }
+    named = set(explicit)
+    _sync_aliases(on_disk_payload, explicit=named)
     if "theme" in on_disk_payload or "tema" in on_disk_payload:
         filled.add("theme")
         filled.add("tema")
@@ -230,7 +287,7 @@ def _apply_legacy(
         if isinstance(chosen, Mapping):
             offer("projects_root", chosen.get("projects_root"))
 
-    _normalize_aliases(result)
+    _normalize_aliases(result, explicit=named)
 
 
 def load_settings(
@@ -241,19 +298,20 @@ def load_settings(
 ) -> dict[str, Any]:
     """Load settings without writing anything.
 
-    Existing destination keys win even when their value is empty; defaults
-    only fill absent slots and legacy files only fill slots absent from the
-    destination file.
+    Defaults fill absent slots; a legacy source fills a slot only when the
+    destination has no usable (non-empty) value for it.  Explicit clears of
+    normally-filled slots (e.g. ``theme: ""``) still win over legacy sources.
     """
     target = settings_path(path)
     on_disk_payload, _ = _read_json(target)
-    _sync_aliases(on_disk_payload)
+    named = set(on_disk_payload)
+    _sync_aliases(on_disk_payload, explicit=named)
     result = copy.deepcopy(DEFAULT_SETTINGS)
     result.update(on_disk_payload)
     if migrate:
-        _apply_legacy(result, on_disk_payload, legacy_sources(legacy_paths))
+        _apply_legacy(result, on_disk_payload, legacy_sources(legacy_paths), explicit=named)
     else:
-        _normalize_aliases(result)
+        _normalize_aliases(result, explicit=named)
     return result
 
 
@@ -265,12 +323,12 @@ def save_settings(
 ) -> Path:
     """Merge ``settings`` into any existing file and write it deterministically."""
     target = settings_path(path)
-    _, bom = _read_json(target)
+    on_disk, bom = _read_json(target)
     # Loading first keeps migrated keys even when a caller writes a partial
     # payload; the explicit updates still take precedence.
     merged = load_settings(target, legacy_paths=legacy_paths)
     merged.update(dict(settings))
-    _normalize_aliases(merged)
+    _normalize_aliases(merged, explicit=set(on_disk) | set(settings))
     return _write_json(target, merged, bom=bom)
 
 

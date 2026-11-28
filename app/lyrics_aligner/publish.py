@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .burn_lock import burn_guard
 from .models import Cue
 from .pipeline import align_to_srt
 from .subtitles import AssStyle, render_ass, validate_ass_style
@@ -124,12 +125,15 @@ def build_burn_command(
     height: int | None = None,
     pad_color: str = "#000000",
     threads: int | None = None,
+    fps: int | None = None,
 ) -> list[str]:
     """Build the FFmpeg command used to burn an ASS file into a new MP4."""
     if Path(ass_name).name != ass_name:
         raise ValueError("The ASS filter name must be a plain file name")
     if not 0 <= int(crf) <= 51:
         raise ValueError("CRF must be between 0 and 51")
+    if fps is not None and not 1 <= int(fps) <= 120:
+        raise ValueError("FPS must be between 1 and 120")
     if (width is None) != (height is None):
         raise ValueError("Output width and height must be provided together")
     filters: list[str] = []
@@ -174,6 +178,8 @@ def build_burn_command(
     ]
     if threads is not None and threads > 0:
         command += ["-threads", str(int(threads))]
+    if fps is not None:
+        command += ["-r", str(int(fps))]
     command += [
         "-c:a",
         "aac",
@@ -197,6 +203,7 @@ def burn_subtitles(
     width: int | None = None,
     height: int | None = None,
     pad_color: str = "#000000",
+    fps: int | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> Path:
     """Render a new MP4 with the ASS subtitles burned into the picture."""
@@ -221,6 +228,7 @@ def burn_subtitles(
         width=width,
         height=height,
         pad_color=pad_color,
+        fps=fps,
     )
     report = progress or (lambda _message: None)
     report(f"Rendering final video with FFmpeg ({preset}, CRF {crf})…")
@@ -247,6 +255,7 @@ def burn_subtitles(
                 width=width,
                 height=height,
                 pad_color=pad_color,
+                fps=fps,
                 threads=1,
             )
             retry = subprocess.run(
@@ -340,6 +349,7 @@ def publish(
     ffmpeg: str | Path | None = None,
     preset: str = "medium",
     crf: int = 18,
+    fps: int | None = None,
     align_options: Mapping[str, Any] | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> PublishResult:
@@ -360,6 +370,8 @@ def publish(
     if burn:
         if not 0 <= int(crf) <= 51:
             raise ValueError("CRF must be between 0 and 51")
+        if fps is not None and not 1 <= int(fps) <= 120:
+            raise ValueError("FPS must be between 1 and 120")
         ffmpeg_path = find_ffmpeg(ffmpeg)
 
     options = dict(align_options or {})
@@ -416,15 +428,18 @@ def publish(
     if burn:
         video_path = output_dir / "video_with_lyrics.mp4"
         try:
-            burn_subtitles(
-                media_path,
-                ass_path,
-                video_path,
-                ffmpeg=burn_info["ffmpeg"],
-                preset=preset,
-                crf=crf,
-                progress=progress,
-            )
+            # Mesma protecao da GUI: nenhum burn paralelo no mesmo destino.
+            with burn_guard(output_dir, progress=progress):
+                burn_subtitles(
+                    media_path,
+                    ass_path,
+                    video_path,
+                    ffmpeg=burn_info["ffmpeg"],
+                    preset=preset,
+                    crf=crf,
+                    fps=fps,
+                    progress=progress,
+                )
         except Exception as exc:
             burn_info["error"] = str(exc)
             payload = build_manifest(

@@ -133,24 +133,62 @@ def _ass_for_text_layers(layers: list[dict], width: int, height: int,
     return header + "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n" + "\n".join(events) + "\n"
 
 
-def _video_size(path: Path) -> tuple[int, int]:
+def _ffprobe(path: Path, args: list[str], subject: str) -> str:
+    """Roda o ffprobe e falha alto (PT) quando o probe nao funciona."""
     ffprobe = TOOLS / "ffprobe.exe" if (TOOLS / "ffprobe.exe").is_file() else "ffprobe"
-    result = subprocess.run(
-        [str(ffprobe), "-v", "error", "-select_streams", "v:0",
-         "-show_entries", "stream=width,height", "-of", "csv=p=0", str(path)],
-        capture_output=True, text=True)
     try:
-        w, h = result.stdout.strip().split(",")[:2]
-        return int(w), int(h)
-    except (ValueError, IndexError):
-        return 1920, 1080
+        result = subprocess.run(
+            [str(ffprobe), "-v", "error", *args, "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace")
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"ffprobe não encontrado ao ler {subject} (nao encontrado no PATH "
+            "ou na instalação). Instale o FFmpeg com o ffprobe e tente novamente."
+        ) from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()[-500:]
+        raise RuntimeError(f"Falha no ffprobe ao ler {subject}: {detail}")
+    return result.stdout or ""
 
 
-def compile_scene(*, scene: dict, video: Path, output: Path, work: Path) -> Path:
-    """Aplica todas as camadas da cena sobre o video e retorna o arquivo final."""
+def _video_size(path: Path) -> tuple[int, int]:
+    out = _ffprobe(path, ["-select_streams", "v:0",
+                          "-show_entries", "stream=width,height"],
+                   "a resolucao do video").strip()
+    parts = out.split(",")
+    if len(parts) >= 2:
+        try:
+            return int(parts[0]), int(parts[1])
+        except ValueError as exc:
+            # Preserva o detalhe da conversao e a saida bruta: mensagem de
+            # erro util em PT, sem descartar o motivo com ``except: pass``.
+            raise RuntimeError(
+                "Resolucao do video indisponivel no ffprobe: nao foi possivel "
+                f"interpretar a saida {out[:200]!r} ({exc})."
+            ) from exc
+    raise RuntimeError(
+        "Resolucao do video indisponivel no ffprobe: saida inesperada "
+        f"{out[:200]!r} (esperado 'largura,altura')."
+    )
+
+
+def compile_scene(*, scene: dict, video: Path, output: Path, work: Path,
+                  fps: int | None = None) -> Path:
+    """Aplica todas as camadas da cena sobre o video e retorna o arquivo final.
+
+    ``fps`` sobrepoe a taxa da cena; quando omitido o valor vem de
+    ``scene["output"]["fps"]`` (ou ``scene["fps"]``), com padrao 30.
+    """
     video = Path(video).resolve(); output = Path(output).resolve(); work = Path(work)
     work.mkdir(parents=True, exist_ok=True)
     width = int(scene.get("width", 1920)); height = int(scene.get("height", 1080))
+    if fps is None:
+        output_cfg = scene.get("output") if isinstance(scene.get("output"), dict) else {}
+        try:
+            fps = int(output_cfg.get("fps", scene.get("fps", 30)))
+        except (TypeError, ValueError):
+            fps = 30
+    fps = max(1, int(fps))
     layers = [l for l in scene.get("layers", []) if l.get("type") == "image"]
     text_layers = [l for l in scene.get("layers", []) if l.get("type") == "text"]
 
@@ -164,7 +202,7 @@ def compile_scene(*, scene: dict, video: Path, output: Path, work: Path) -> Path
         filters.append(
             f"[0:v:0]scale={width}:{height}:force_original_aspect_ratio=decrease,"
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=0x00000000,"
-            f"setsar=1,fps=30[base]"
+            f"setsar=1,fps={fps}[base]"
         )
         last = "[base]"
 
@@ -207,8 +245,8 @@ def compile_scene(*, scene: dict, video: Path, output: Path, work: Path) -> Path
         if fade_out:
             chain.append(f"fade=t=out:st={max(0, end - fade_out):.3f}:d={fade_out}:alpha=1")
         if layer.get("ken_burns"):
-            chain.append(f"zoompan=z='min(zoom+0.0015,1.12)':d=1:s={w}x{h}:fps=30")
-        chain.append("fps=30")
+            chain.append(f"zoompan=z='min(zoom+0.0015,1.12)':d=1:s={w}x{h}:fps={fps}")
+        chain.append(f"fps={fps}")
         chain[-1] += label
         filters.append(",".join(chain))
         out = f"[mix{index}]"
@@ -338,11 +376,10 @@ def render_preview(*, scene: dict, background: Path | None, time: float,
 
 
 def _has_audio(path: Path) -> bool:
-    ffprobe = TOOLS / "ffprobe.exe" if (TOOLS / "ffprobe.exe").is_file() else "ffprobe"
-    result = subprocess.run([str(ffprobe), "-v", "error", "-select_streams", "a",
-                             "-show_entries", "stream=index", "-of", "csv=p=0", str(path)],
-                            capture_output=True, text=True)
-    return bool(result.stdout.strip())
+    # stdout vazio com returncode 0 = sem stream de audio (NAO e falha no probe).
+    out = _ffprobe(path, ["-select_streams", "a", "-show_entries", "stream=index"],
+                   "as faixas de audio")
+    return bool(out.strip())
 
 
 def _run(command: list[str], cwd: Path | None = None) -> None:

@@ -188,10 +188,19 @@ class HymnProject:
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent) + "\n"
 
     def save(self, path: str | Path) -> Path:
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(self.to_json(), encoding="utf-8")
-        return path
+        """Save atomically, keeping the BOM and skipping an identical payload."""
+        target = Path(path)
+        payload = self.to_dict()
+        raw = _read_bytes(target)
+        if _same_payload(raw, payload):
+            return target
+        data = self.to_json().encode("utf-8")
+        if raw is not None and raw.startswith(codecs.BOM_UTF8):
+            data = codecs.BOM_UTF8 + data
+        if raw == data:
+            return target
+        _atomic_write_bytes(target, data)
+        return target
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "HymnProject":
@@ -421,21 +430,18 @@ def read_project_meta(path: str | Path) -> dict[str, Any]:
     return _read_project_meta(Path(path))[0]
 
 
-def write_project_meta(
-    path: str | Path, payload: Mapping[str, Any], *, bom: bool | None = None
-) -> Path:
-    """Atomically write a full ``projeto.json`` payload, preserving a BOM."""
-    target = Path(path)
-    if bom is None:
-        bom = _read_project_meta(target)[1]
-    target.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(dict(payload), ensure_ascii=False, indent=2) + "\n"
-    data = text.encode("utf-8")
-    if bom:
-        data = codecs.BOM_UTF8 + data
+def _read_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
 
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Replace ``path`` via temp file, fsync and atomic ``os.replace``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(
-        prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent)
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
     )
     temp_path = Path(temp_name)
     try:
@@ -443,7 +449,7 @@ def write_project_meta(
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp_path, target)
+        os.replace(temp_path, path)
     except BaseException:
         try:
             os.close(fd)
@@ -454,6 +460,40 @@ def write_project_meta(
         except OSError:
             pass
         raise
+
+
+def _same_payload(raw: bytes | None, payload: Mapping[str, Any]) -> bool:
+    """True when the file already holds the same JSON object (any formatting)."""
+    if raw is None:
+        return False
+    try:
+        current = json.loads(raw.decode("utf-8-sig"))
+    except (ValueError, UnicodeError):
+        return False
+    return isinstance(current, dict) and current == dict(payload)
+
+
+def write_project_meta(
+    path: str | Path, payload: Mapping[str, Any], *, bom: bool | None = None
+) -> Path:
+    """Atomically write a full ``projeto.json`` payload, preserving a BOM.
+
+    An unchanged payload is never rewritten: the existing JSON object and the
+    exact bytes are checked before a temp file is created.
+    """
+    target = Path(path)
+    raw = _read_bytes(target)
+    if bom is None:
+        bom = bool(raw and raw.startswith(codecs.BOM_UTF8))
+    if _same_payload(raw, payload):
+        return target
+    text = json.dumps(dict(payload), ensure_ascii=False, indent=2) + "\n"
+    data = text.encode("utf-8")
+    if bom:
+        data = codecs.BOM_UTF8 + data
+    if raw == data:
+        return target
+    _atomic_write_bytes(target, data)
     return target
 
 

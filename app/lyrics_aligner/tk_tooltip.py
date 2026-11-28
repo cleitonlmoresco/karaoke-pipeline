@@ -8,8 +8,72 @@ widget being inspected.
 from __future__ import annotations
 
 import tkinter as tk
+from typing import Any
 
 from .i18n import find_key, mark_tooltip
+
+
+def _ui_scale(widget):
+    """Provider opcional subindo a cadeia de pais; ``None`` = escala neutra.
+
+    Um tooltip pode pertencer a uma Toplevel filha (ex.: Configuracoes
+    avancadas), que nao carrega o ``ui_scale`` exposto no root.  A busca
+    percorre ``winfo_parent``/``nametowidget`` e, quando esse elo termina,
+    o ``master`` Python da Toplevel, ate encontrar um toplevel com provider.
+    """
+    node = widget
+    seen: set[object] = set()
+    for _ in range(64):  # teto contra ciclos de parentesco
+        if node is None:
+            break
+        key = str(getattr(node, "_w", "")) or id(node)
+        if key in seen:
+            break
+        seen.add(key)
+        provider = getattr(node, "ui_scale", None)
+        if provider is not None:
+            return provider
+        parent = None
+        try:
+            name = node.winfo_parent()
+        except Exception:
+            name = ""
+        if name and name != str(node):
+            try:
+                parent = node.nametowidget(name)
+            except Exception:
+                parent = None
+        if parent is None:
+            master = getattr(node, "master", None)
+            if master is not None and master is not node:
+                parent = master
+        node = parent
+    return None
+
+
+def _scaled_font(widget, family: str, size: Any, *styles):
+    """Fonte escalada pelo provider, ou a fonte original se ele nao existir."""
+    provider = _ui_scale(widget)
+    font_fn = getattr(provider, "font", None)
+    if callable(font_fn):
+        try:
+            return tuple(font_fn(family, size, *styles))
+        except Exception:
+            pass
+    return (family, size, *styles)
+
+
+def _scale_factor(widget) -> float:
+    """Fator BASE do root, com fallback neutro (1.0)."""
+    provider = _ui_scale(widget)
+    factor_fn = getattr(provider, "factor", None)
+    if not callable(factor_fn):
+        return 1.0
+    try:
+        value = float(factor_fn())
+    except Exception:
+        return 1.0
+    return value if value > 0 else 1.0
 
 
 class DelayedTooltip:
@@ -48,6 +112,10 @@ class DelayedTooltip:
         self._tip = tk.Toplevel(root)
         self._tip.wm_overrideredirect(True)
         self._tip.wm_attributes("-topmost", True)
+        # O provider pode estar no root e nao na Toplevel filha que hospeda o
+        # widget dono: a resolucao parte do widget e sobe a cadeia de pais.
+        owner = self.widget
+        factor = _scale_factor(owner)
         label = tk.Label(
             self._tip,
             text=self.text,
@@ -56,8 +124,8 @@ class DelayedTooltip:
             foreground="#000000",
             relief="solid",
             borderwidth=1,
-            font=("Segoe UI", 9),
-            wraplength=320,
+            font=_scaled_font(owner, "Segoe UI", 9),
+            wraplength=max(1, round(320 * factor)),
             padx=8,
             pady=6,
         )

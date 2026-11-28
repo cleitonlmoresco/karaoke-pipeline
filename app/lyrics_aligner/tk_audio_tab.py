@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import weakref
 from pathlib import Path
 from tkinter import END, LEFT, X, BooleanVar, StringVar, Text, messagebox
 from tkinter import ttk
@@ -27,6 +28,26 @@ from .process_runner import JobCancelled, console_python, run_job
 APP_NAME = "Vilm Lyrics Aligner"
 # Raiz de ``app``: fica um nivel acima de lyrics_aligner, como em desktop.py.
 VILM_APP_PATH = Path(__file__).resolve().parents[2] / "app"
+
+
+def _ui_scale(widget):
+    """Provider opcional no root da janela; ``None`` = escala neutra."""
+    try:
+        return getattr(widget.winfo_toplevel(), "ui_scale", None)
+    except Exception:
+        return None
+
+
+def _scaled_font(widget, family, size, *styles):
+    """Fonte escalada pelo provider, ou a fonte original se ele nao existir."""
+    provider = _ui_scale(widget)
+    font_fn = getattr(provider, "font", None)
+    if callable(font_fn):
+        try:
+            return tuple(font_fn(family, size, *styles))
+        except Exception:
+            pass
+    return (family, size, *styles)
 
 
 def _job_python() -> str:
@@ -135,8 +156,43 @@ class AudioTab:
         self.audio_cancel_button = self._button(
             arow2, "cancel", self._audio_cancel)
         self.audio_progress = ttk.Progressbar(audio_frame, mode="indeterminate")
-        self.audio_log = Text(audio_frame, height=4, wrap="word", font=("Consolas", 9))
+        self.audio_log = Text(
+            audio_frame, height=4, wrap="word",
+            font=_scaled_font(audio_frame, "Consolas", 9),
+        )
         self.audio_log.pack(fill=X, pady=(6, 0))
+        self._register_scale()
+
+    # ---- escala visual (somente a fonte do log) -------------------------
+    def _apply_audio_font(self) -> None:
+        """Reaplica a fonte BASE escalada; widget destruido e ignorado."""
+        log = getattr(self, "audio_log", None)
+        if log is None:
+            return
+        try:
+            if not log.winfo_exists():
+                return
+            log.configure(font=_scaled_font(log, "Consolas", 9))
+        except Exception:
+            pass
+
+    def _register_scale(self) -> None:
+        """Um callback por instancia, sem segurar a aba viva (weakref)."""
+        if getattr(self, "_scale_registered", False):
+            return
+        provider = _ui_scale(self.audio_log)
+        on_apply = getattr(provider, "on_apply", None)
+        if not callable(on_apply):
+            return
+        tab_ref = weakref.ref(self)
+
+        def _reapply():
+            tab = tab_ref()
+            if tab is not None:
+                tab._apply_audio_font()
+
+        on_apply(_reapply)
+        self._scale_registered = True
 
     def refresh_language(self, _lang: str | None = None) -> None:
         """Reaplica os rotulos de audio sem alterar valores digitados."""
@@ -149,12 +205,40 @@ class AudioTab:
                 pass
 
     # ---- ferramentas de audio ------------------------------------------
+    def _audio_notify(self, text: str) -> None:
+        """Status + log pela fachada, sem exigir metodos opcionais do app."""
+        setter = getattr(self.app, "set_status", None)
+        if callable(setter):
+            try:
+                setter(str(text))
+            except Exception:
+                pass
+        try:
+            self._audio_append_log(str(text))
+        except Exception:
+            pass
+
     def _audio_use_selected(self) -> None:
+        # A aba Producao pode ainda nao ter sido construida (abinas lazy).
+        ensure = getattr(self.app, "_ensure_production", None)
+        if callable(ensure):
+            try:
+                ensure()
+            except Exception as exc:
+                self._audio_notify(t("error_msg", exc=exc))
+                return
         item = self.app.selected_batch_item()
         if item:
-            self.audio_media.set(item)
-        elif self.app.media_path:
-            self.audio_media.set(str(self.app.media_path))
+            self.audio_media.set(str(item))
+            return
+        media = self.app.media_path
+        if media:
+            self.audio_media.set(str(media))
+            return
+        # Sem midia selecionada: aviso explicito, sem preencher o campo com "".
+        message = t("audio_no_media")
+        messagebox.showinfo(APP_NAME, message)
+        self._audio_notify(message)
 
     def _audio_path(self) -> Path | None:
         value = self.audio_media.get().strip()
@@ -276,17 +360,24 @@ class AudioTab:
 
     def _audio_output_paths(self, media: Path, suffix: str | None
                             ) -> tuple[Path, Path | None]:
-        """Destino do audio: dentro do projeto quando existe, senao o legado."""
+        """Destino do audio: dentro do projeto quando existe, senao o legado.
+
+        A entrada pode ser um ``.wav``: nesse caso o nome de saida e sempre
+        diferente para nao sobrescrever a propria midia analisada.
+        """
         root = self.app.project_root_for(media)
+        tail = " - " + suffix if suffix else " - analise"
         if root is not None:
             audio_dir = root / "trabalho" / "audio"
             audio_dir.mkdir(parents=True, exist_ok=True)
-            name = media.stem + (" - " + suffix if suffix else " - analise") + ".wav"
-            return audio_dir / name, audio_dir / "_work"
-        if suffix is not None:
-            return media.with_name(media.stem + " - " + suffix + ".wav"), \
-                media.parent / "trabalho" / "audio"
-        return media.with_suffix(".wav"), None
+            output = audio_dir / (media.stem + tail + ".wav")
+            if output.name == media.name and output.parent == media.parent:
+                output = audio_dir / (media.stem + tail + " - saida.wav")
+            return output, audio_dir / "_work"
+        output = media.with_name(media.stem + tail + ".wav")
+        if output.name == media.name:
+            output = media.with_name(media.stem + tail + " - saida.wav")
+        return output, media.parent / "trabalho" / "audio"
 
     def _audio_run(self, args: list[str] | None = None, suffix: str = "audio") -> None:
         media = self._audio_path()

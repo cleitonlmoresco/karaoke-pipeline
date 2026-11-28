@@ -9,14 +9,46 @@ from __future__ import annotations
 
 import tkinter as tk
 from tkinter import colorchooser, ttk
+from tkinter import font as tkfont
 from pathlib import Path
+import weakref
 
-from .i18n import t
+from .i18n import mark, mark_tooltip, t
 from .settings import load_settings, save_settings
+from .tk_tooltip import add_tooltip
 
 CONFIG_PATH = Path.home() / ".vilm_tkinter_config.json"
+# Used when the platform cannot enumerate installed font families.
+FONT_FAMILIES_FALLBACK = ("Arial", "Segoe UI", "Consolas", "Courier New", "Times New Roman")
 # Text fields that may be intentionally cleared to an empty string.
 _CLEARABLE_KEYS = {"projects_root", "font_family"}
+# Uma fonte vazia em settings.json derrubaria o tema silenciosamente.
+FONT_FAMILY_FALLBACK = "Segoe UI"
+
+
+def _resolved_font_family(value) -> str:
+    """Resolve uma familia de fonte vazia para o fallback seguro."""
+    return str(value or "").strip() or FONT_FAMILY_FALLBACK
+
+
+def _ui_scale(widget):
+    """Provider opcional no root da janela; ``None`` = escala neutra."""
+    try:
+        return getattr(widget.winfo_toplevel(), "ui_scale", None)
+    except Exception:
+        return None
+
+
+def _scaled_font(widget, family, size, *styles):
+    """Fonte escalada pelo provider, ou a fonte original se ele nao existir."""
+    provider = _ui_scale(widget)
+    font_fn = getattr(provider, "font", None)
+    if callable(font_fn):
+        try:
+            return tuple(font_fn(family, size, *styles))
+        except Exception:
+            pass
+    return (family, size, *styles)
 
 DEFAULT_ADVANCED = {
     "theme": "light",
@@ -44,6 +76,7 @@ def load_advanced_config(path: str | Path | None = None) -> dict:
         value = payload.get(key)
         if value is not None and (value != "" or key in _CLEARABLE_KEYS):
             result[key] = value
+    result["font_family"] = _resolved_font_family(result["font_family"])
     return result
 
 
@@ -56,6 +89,8 @@ def save_advanced_config(cfg: dict, path: str | Path | None = None) -> None:
         and value is not None
         and (value != "" or key in _CLEARABLE_KEYS)
     }
+    if "font_family" in payload:
+        payload["font_family"] = _resolved_font_family(payload["font_family"])
     save_settings(payload, path)
 
 
@@ -88,6 +123,57 @@ class AdvancedSettingsWindow:
 
         self.vars: dict[str, tk.Variable] = {}
         self._build()
+        self._register_scale()
+
+    # ---- escala visual (somente a fonte do preview) ---------------------
+    def _preview_font(self):
+        """Fonte BASE do preview, escalada quando a casca oferece provider."""
+        family = _resolved_font_family(self.cfg.get("font_family"))
+        # ``parent`` e o root da casca: a Toplevel filha nao carrega ui_scale.
+        return _scaled_font(self.parent, family, self.cfg.get("font_size", 10))
+
+    def _apply_preview_font(self) -> None:
+        preview = getattr(self, "preview", None)
+        if preview is None:
+            return
+        try:
+            if not preview.winfo_exists():
+                return
+            preview.configure(font=self._preview_font())
+        except Exception:
+            pass
+
+    def _register_scale(self) -> None:
+        """Um callback por janela; weakref evita manter a janela viva."""
+        if getattr(self, "_scale_registered", False):
+            return
+        provider = _ui_scale(self.parent)
+        on_apply = getattr(provider, "on_apply", None)
+        if not callable(on_apply):
+            return
+        window_ref = weakref.ref(self)
+
+        def _reapply():
+            window = window_ref()
+            if window is not None:
+                window._apply_preview_font()
+
+        on_apply(_reapply)
+        self._scale_registered = True
+
+    def _font_families(self) -> list[str]:
+        """Installed font families, queried once and cached for this window."""
+        cached = getattr(self, "_font_families_cache", None)
+        if cached is None:
+            try:
+                families = sorted(set(tkfont.families(self.parent.winfo_toplevel())))
+            except Exception:
+                families = []
+            if not families:
+                families = sorted(set(FONT_FAMILIES_FALLBACK))
+            cached = list(families)
+            self._font_families_cache = cached
+        return list(cached)
 
     def _build(self) -> None:
         notebook = ttk.Notebook(self.window)
@@ -173,9 +259,18 @@ class AdvancedSettingsWindow:
             self._update_preview()
 
     def _build_font_tab(self, parent) -> None:
-        ttk.Label(parent, text=t("font_family_label")).grid(row=0, column=0, sticky="w", padx=8, pady=6)
+        lbl_font = ttk.Label(parent, text=t("font_family_label"))
+        mark(lbl_font, "font_family_label")
+        lbl_font.grid(row=0, column=0, sticky="w", padx=8, pady=6)
         self.v_font_family = tk.StringVar(value=self.cfg["font_family"])
-        ttk.Entry(parent, textvariable=self.v_font_family, width=20).grid(row=0, column=1, sticky="w", padx=8, pady=6)
+        self.w_font_family = ttk.Combobox(
+            parent, textvariable=self.v_font_family, values=self._font_families(),
+            width=20, state="normal",
+        )
+        self.w_font_family.grid(row=0, column=1, sticky="w", padx=8, pady=6)
+        self.font_combo = self.w_font_family
+        add_tooltip(self.w_font_family, t("tip_font"))
+        mark_tooltip(self.w_font_family, "tip_font")
 
         ttk.Label(parent, text=t("font_size_label")).grid(row=1, column=0, sticky="w", padx=8, pady=6)
         self.v_font_size = tk.IntVar(value=self.cfg["font_size"])
@@ -202,14 +297,16 @@ class AdvancedSettingsWindow:
         try:
             bg = self.vars.get("bg_color", tk.StringVar(value=self.cfg["bg_color"])).get()
             fg = self.vars.get("fg_color", tk.StringVar(value=self.cfg["fg_color"])).get()
-            self.preview.config(bg=bg, fg=fg, font=(self.cfg.get("font_family", "Segoe UI"), self.cfg.get("font_size", 10)))
+            self.preview.config(bg=bg, fg=fg, font=self._preview_font())
         except Exception:
             pass
 
     def _collect(self) -> dict:
         cfg = dict(self.cfg)
         cfg["theme"] = self.v_theme.get()
-        cfg["font_family"] = self.v_font_family.get()
+        cfg["font_family"] = _resolved_font_family(self.v_font_family.get())
+        # Reflete o fallback no combobox para o preview e a proxima coleta.
+        self.v_font_family.set(cfg["font_family"])
         cfg["font_size"] = int(self.v_font_size.get())
         cfg["log_font_size"] = int(self.v_log_font_size.get())
         cfg["window_width"] = int(self.v_win_w.get())

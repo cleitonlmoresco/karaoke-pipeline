@@ -42,6 +42,77 @@ def _call_run_job(command, **kwargs):
     return process_runner.run_job(command, **kwargs)
 
 
+# FFmpeg empacotado com o aplicativo (<raiz>/tools/ffmpeg.exe).  A funcao
+# ``publish.py`` nao expoe combine_side_by_side; a implementacao aba e local
+# para que o botao de preview nunca gere ImportError.
+BUNDLED_FFMPEG = APP_PATH.parent / "tools" / "ffmpeg.exe"
+
+
+def find_preview_ffmpeg(explicit=None) -> Path:
+    """Resolve o ffmpeg bundled (ou um substituto explicito/por ambiente)."""
+    candidates = []
+    if explicit:
+        candidates.append(Path(explicit).expanduser())
+    for variable in ("VILM_FFMPEG", "FFMPEG"):
+        value = os.environ.get(variable)
+        if value:
+            candidates.append(Path(value).expanduser())
+    candidates.append(BUNDLED_FFMPEG)
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return candidate.resolve()
+        except OSError:
+            continue
+    raise FileNotFoundError(
+        f"FFmpeg nao encontrado ({BUNDLED_FFMPEG}). "
+        "Instale o FFmpeg ou defina VILM_FFMPEG com o caminho do executavel."
+    )
+
+
+def combine_side_by_side(sung, playback, output, *, ffmpeg=None, on_output=None):
+    """Gera um preview lado a lado com o ffmpeg bundled.
+
+    Escolha documentada: ``hstack`` (horizontal).  As duas entradas sao
+    redimensionadas para a mesma altura (540 px, preservando a proporcao) e
+    colocadas uma ao lado da outra; o audio da primeira entrada e mantido.
+    """
+    source_a = Path(sung)
+    source_b = Path(playback)
+    destination = Path(output)
+    if not source_a.is_file():
+        raise FileNotFoundError(f"Video nao encontrado: {source_a}")
+    if not source_b.is_file():
+        raise FileNotFoundError(f"Video nao encontrado: {source_b}")
+    if destination.resolve() in {source_a.resolve(), source_b.resolve()}:
+        raise ValueError("A saída nao pode ser um dos videos de entrada.")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    executable = find_preview_ffmpeg(ffmpeg)
+    filter_complex = (
+        "[0:v]scale=-2:540[left];"
+        "[1:v]scale=-2:540[right];"
+        "[left][right]hstack=inputs=2[outv]"
+    )
+    command = [
+        str(executable), "-hide_banner", "-nostdin", "-y",
+        "-i", str(source_a), "-i", str(source_b),
+        "-filter_complex", filter_complex,
+        "-map", "[outv]", "-map", "0:a?",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+        "-c:a", "aac", "-shortest", str(destination),
+    ]
+    kwargs = {}
+    if on_output is not None:
+        kwargs["on_output"] = on_output
+    result = _call_run_job(command, **kwargs)
+    if getattr(result, "returncode", 0) != 0:
+        detail = str(getattr(result, "output", "") or "ffmpeg falhou").strip()
+        raise RuntimeError(f"ffmpeg falhou: {detail[-2000:]}")
+    if not destination.is_file():
+        raise FileNotFoundError(f"Preview nao gerado: {destination}")
+    return destination
+
+
 class PipelineTab:
     def __init__(self, parent: ttk.Frame, app, tools_only: bool = False) -> None:
         # Aceita as duas convencoes de chamada: (parent, app) historico e
@@ -190,7 +261,7 @@ class PipelineTab:
                 return candidate.strip()
         try:
             profiles_path = getattr(self.app, "profiles_path", None)
-            return str(profiles_api.get_active_profile(profiles_path) or "").strip()
+            return str(profiles_api.get_active_profile(path=profiles_path) or "").strip()
         except Exception:
             return ""
 
@@ -234,7 +305,9 @@ class PipelineTab:
         align = {}
         if profile_name:
             try:
-                align = profiles_api.profile_settings(profile_name).get("alignment") or {}
+                align = profiles_api.profile_settings(
+                    profile_name, path=getattr(self.app, "profiles_path", None)
+                ).get("alignment") or {}
             except Exception:
                 align = {}
         if not align:
@@ -327,6 +400,64 @@ class PipelineTab:
         text_widget.see(tk.END)
         text_widget.config(state=tk.DISABLED)
 
+    def _status(self, text: str) -> None:
+        """Status pela fachada, sem exigir que a casca implemente ``set_status``."""
+        setter = getattr(self.app, "set_status", None)
+        if callable(setter):
+            try:
+                setter(str(text))
+            except Exception:
+                pass
+
+    def _cue_editor_tab(self):
+        return getattr(self.app, "cue_editor_tab", None)
+
+    def _cue_selection(self) -> tuple[str, ...]:
+        """IIDs selecionados no editor, antes de substituir os cues."""
+        tab = self._cue_editor_tab()
+        tree = getattr(tab, "tree", None)
+        if tree is None:
+            return ()
+        try:
+            return tuple(str(i) for i in tree.selection())
+        except Exception:
+            return ()
+
+    def _restore_cue_selection(self, selection) -> None:
+        """Reaplica a selecao apos ``set_cues`` (que recria as linhas)."""
+        if not selection:
+            return
+        tab = self._cue_editor_tab()
+        tree = getattr(tab, "tree", None)
+        if tree is None:
+            return
+        try:
+            children = set(tree.get_children())
+            valid = [str(i) for i in selection if str(i) in children]
+            if not valid:
+                return
+            tree.selection_remove(*tree.selection())
+            for iid in valid:
+                tree.selection_add(iid)
+            tree.focus(valid[0])
+        except Exception:
+            pass
+
+    @staticmethod
+    def _replaced_cue(cue, text: str):
+        """Copia o cue preservando os demais campos (inclusive subclasses)."""
+        try:
+            from dataclasses import is_dataclass, replace
+
+            if is_dataclass(cue) and not isinstance(cue, type):
+                return replace(cue, text=text)
+        except Exception:
+            pass
+        try:
+            return type(cue)(text=text, start=cue.start, end=cue.end)
+        except Exception:
+            return cue
+
     def _progress_start(self) -> None:
         progress = getattr(self, "progress", None)
         if progress is not None:
@@ -338,17 +469,16 @@ class PipelineTab:
             self.app.root.after(0, lambda: progress.stop())
 
     def _lyrics_widget(self):
-        """Fonte de letra: widget proprio (modo completo) ou fachada da casca."""
+        """Widget de texto proprio (modo completo), nunca uma string da fachada.
+
+        A fachada ``app.lyrics_text()`` devolve texto; chamadores que precisam
+        de ``get``/``delete``/``insert`` devem usar ``_find_replace``, que
+        trabalha sobre ``app.cues()`` / ``app.set_cues()`` quando ha cues.
+        """
         widget = getattr(self, "lyrics_text", None)
-        if widget is not None:
+        if all(hasattr(widget, name) for name in ("get", "delete", "insert")):
             return widget
-        getter = getattr(self.app, "lyrics_text", None)
-        if callable(getter):
-            try:
-                return getter()
-            except Exception:
-                return None
-        return widget
+        return None
 
     def _run_align(self) -> None:
         if self.cantado_path is None:
@@ -478,7 +608,8 @@ class PipelineTab:
         threading.Thread(target=worker, daemon=True).start()
 
     def _run_combine(self) -> None:
-        from .publish import combine_side_by_side
+        # ``publish.py`` nao define combine_side_by_side: a implementacao local
+        # deste modulo usa o ffmpeg bundled e nunca gera ImportError.
         import os
 
         a = filedialog.askopenfilename(title=t("select_sung_video"), filetypes=[("MP4", "*.mp4")])
@@ -494,14 +625,20 @@ class PipelineTab:
         def worker() -> None:
             self._progress_start()
             try:
-                result = combine_side_by_side(a, b, out)
-                self._log(f"Preview combinado: {result}")
+                result = combine_side_by_side(a, b, out, on_output=self._log)
+                message = f"Preview combinado (hstack): {result}"
+                self._log(message)
+                self._status(message)
                 try:
                     os.startfile(str(result))
                 except Exception as exc:
-                    self._log(t("open_auto_error", exc=exc))
+                    warning = t("open_auto_error", exc=exc)
+                    self._log(warning)
+                    self._status(warning)
             except Exception as exc:
-                self._log(t("error_msg", exc=exc))
+                message = t("error_msg", exc=exc)
+                self._log(message)
+                self._status(message)
             finally:
                 self._progress_stop()
 
@@ -533,39 +670,85 @@ class PipelineTab:
 
                 staging = prepare_staging(project_dir, [Path(f) for f in finals],
                                          change_log=[t("change_burn_done"), t("change_validation_ok")])
-                self._log(t("stage_ready", path=staging))
+                message = t("stage_ready", path=staging)
+                self._log(message)
+                self._status(message)
                 import os
                 try:
                     os.startfile(str(staging))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # Abrir a pasta e conveniencia: avisa, mas nao e erro do staging.
+                    warning = t("open_auto_error", exc=exc)
+                    self._log(warning)
+                    self._status(warning)
             except Exception as exc:
-                self._log(t("staging_error", exc=exc))
+                message = t("staging_error", exc=exc)
+                self._log(message)
+                self._status(message)
 
         threading.Thread(target=worker, daemon=True).start()
     def _find_replace(self) -> None:
+        """Buscar/substituir sobre os cues da fachada (ou o Text proprio).
+
+        A fachada ``app.cues()`` devolve objetos e ``app.set_cues()`` reaplica
+        a lista ao editor (com undo).  A selecao da Treeview e restaurada
+        depois da substituicao para nao perder o cue em edicao.
+        """
         from tkinter import simpledialog
+
         find = simpledialog.askstring(t("find_title"), t("find_prompt"))
         if not find:
             return
         replace = simpledialog.askstring(t("replace_title"), t("replace_prompt"))
         if replace is None:
             return
+
+        cues = self._edited_cues()
+        if cues:
+            selection = self._cue_selection()
+            updated = []
+            count = 0
+            for cue in cues:
+                text = str(getattr(cue, "text", ""))
+                hits = text.count(find)
+                count += hits
+                updated.append(
+                    self._replaced_cue(cue, text.replace(find, replace)) if hits else cue
+                )
+            if count == 0:
+                message = t("text_not_found")
+                self._log(message)
+                self._status(message)
+                return
+            if not self._set_edited_cues(updated):
+                message = t("error_msg", exc="app.set_cues() indisponivel")
+                self._log(message)
+                self._status(message)
+                return
+            self._restore_cue_selection(selection)
+            message = t("replaced_count", n=count)
+            self._log(message)
+            self._status(message)
+            return
+
         widget = self._lyrics_widget()
-        if widget is None or not all(
-            hasattr(widget, name) for name in ("get", "delete", "insert")
-        ):
-            self._log(t("paste_lyrics"))
+        if widget is None:
+            message = t("paste_lyrics")
+            self._log(message)
+            self._status(message)
             return
         text = widget.get("1.0", tk.END)
         count = text.count(find)
         if count == 0:
-            self._log(t("text_not_found"))
+            message = t("text_not_found")
+            self._log(message)
+            self._status(message)
             return
-        new_text = text.replace(find, replace)
         widget.delete("1.0", tk.END)
-        widget.insert("1.0", new_text)
-        self._log(t("replaced_count", n=count))
+        widget.insert("1.0", text.replace(find, replace))
+        message = t("replaced_count", n=count)
+        self._log(message)
+        self._status(message)
 
     def _export_formats(self) -> None:
         import threading

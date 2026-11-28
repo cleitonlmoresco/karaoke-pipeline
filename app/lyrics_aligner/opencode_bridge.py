@@ -3,30 +3,87 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
 
+INSTALL_DIR = Path(__file__).resolve().parents[2]
+
+# Apenas candidatos fixos: nunca varredura recursiva (rglob) na inicializacao.
 OPENCODE_CANDIDATES = [
-    Path(r"C:\Users\IEAD Midia Canarana\AppData\Local\Programs\ai.opencode.desktop\resources\opencode-cli.exe"),
+    INSTALL_DIR / "opencode-cli.exe",
+    INSTALL_DIR / "tools" / "opencode-cli.exe",
     Path(r"C:\Program Files\OpenCode\opencode-cli.exe"),
 ]
 
 
-def find_opencode() -> Path | None:
-    # PATH first
-    found = shutil.which("opencode") or shutil.which("opencode-cli")
-    if found:
-        return Path(found)
-    for cand in OPENCODE_CANDIDATES:
-        if cand.is_file():
-            return cand
-    # search common locations
-    for root in (Path.home(), Path(r"C:\Users")):
-        for p in root.rglob("opencode-cli.exe"):
-            return p
+def _local_app_data_candidates() -> list[Path]:
+    root = os.environ.get("LOCALAPPDATA")
+    if not root:
+        return []
+    programs = Path(root) / "Programs"
+    return [
+        programs / "OpenCode" / "opencode-cli.exe",
+        programs / "opencode" / "opencode-cli.exe",
+        programs / "ai.opencode.desktop" / "resources" / "opencode-cli.exe",
+        programs / "opencode.desktop" / "resources" / "opencode-cli.exe",
+    ]
+
+
+def _cli_in_path(name: str) -> Path | None:
+    """PATH sem ``shutil.which`` extra e sem varredura recursiva."""
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        candidate = Path(entry.strip().strip('"')) / name
+        try:
+            if candidate.is_file():
+                return candidate.resolve()
+        except OSError:
+            continue
     return None
+
+
+_UNRESOLVED = object()
+_opencode_cache: Path | None | object = _UNRESOLVED
+
+
+def _resolve_opencode() -> Path | None:
+    # Uma unica chamada a which (PATH).  O nome alternativo e procurado
+    # diretamente em PATH, sem outra resolucao.
+    found = shutil.which("opencode")
+    if found:
+        return Path(found).resolve()
+    found_cli = _cli_in_path("opencode-cli.exe") or _cli_in_path("opencode-cli")
+    if found_cli:
+        return found_cli
+    for candidate in (*OPENCODE_CANDIDATES, *_local_app_data_candidates()):
+        try:
+            if candidate.is_file():
+                return candidate.resolve()
+        except OSError:
+            continue
+    return None
+
+
+def find_opencode() -> Path | None:
+    """Resolve o CLI uma unica vez por processo (cache explicito)."""
+    global _opencode_cache
+    if _opencode_cache is _UNRESOLVED:
+        _opencode_cache = _resolve_opencode()
+    return _opencode_cache  # type: ignore[return-value]
+
+
+def invalidate_opencode_cache() -> None:
+    """Descarta a resolucao em cache (util apos instalar/mover o CLI)."""
+    global _opencode_cache
+    _opencode_cache = _UNRESOLVED
+
+
+# Forma alternativa de invalidar, compativel com ``functools.cache``.
+find_opencode.cache_clear = invalidate_opencode_cache  # type: ignore[attr-defined]
 
 
 def run_prompt(prompt: str, *, model: str | None = None, timeout: int = 120) -> str:

@@ -42,6 +42,41 @@ APP_NAME = "Vilm Lyrics Aligner"
 VILM_APP_PATH = Path(__file__).resolve().parents[2] / "app"
 
 
+def _scale_provider(widget, app=None) -> object | None:
+    """Localiza o ``UiScale`` do toplevel, com espelho da fachada legada.
+
+    A casca expoe o provider em ``root.ui_scale``.  Em shells antigas, onde o
+    atributo ainda nao foi espelhado, a fachada ``app.ui_scale`` e usada e
+    copiada para o toplevel para que todas as abas compartilhem a instancia.
+    Nenhuma chamada Tcl aqui e feita fora da thread principal.
+    """
+    try:
+        toplevel = widget.winfo_toplevel()
+    except Exception:
+        return None
+    provider = getattr(toplevel, "ui_scale", None)
+    if provider is None and app is not None:
+        provider = getattr(app, "ui_scale", None)
+        if provider is not None:
+            try:
+                setattr(toplevel, "ui_scale", provider)
+            except Exception:
+                pass
+    return provider
+
+
+def _scale_factor(widget, app=None) -> float:
+    """Fator atual, com fallback neutro (1.0) quando nao ha provider."""
+    provider = _scale_provider(widget, app)
+    if provider is None:
+        return 1.0
+    try:
+        value = float(provider.factor())
+    except Exception:
+        return 1.0
+    return value if value > 0 else 1.0
+
+
 def _format_time(seconds: float) -> str:
     seconds = max(0.0, float(seconds))
     minutes, remainder = divmod(seconds, 60.0)
@@ -56,6 +91,16 @@ def _result_value(result, key: str, default=None):
     if isinstance(result, dict):
         return result.get(key, default)
     return getattr(result, key, default)
+
+
+def _replace_folder_tokens(text: str, caminho: str) -> str:
+    """Substitui os dois tokens da dica de pasta (pt usa {pasta}, en/ko {folder})."""
+    return str(text).replace("{pasta}", str(caminho)).replace("{folder}", str(caminho))
+
+
+def folder_hint_text(caminho: str) -> str:
+    """Dica de pasta com o caminho resolvido nos tres idiomas."""
+    return _replace_folder_tokens(t("folder_hint"), caminho)
 
 
 class ProductionTab:
@@ -102,6 +147,50 @@ class ProductionTab:
         """Status via fachada (o widget pertence a este modulo)."""
         self.app.set_status(text)
 
+    # ---- escala visual --------------------------------------------------
+    def _factor(self) -> float:
+        return _scale_factor(self.parent, self.app)
+
+    def _px(self, base: float) -> int:
+        return max(1, round(float(base) * self._factor()))
+
+    def _font(self, family: str, size: int, *styles) -> tuple:
+        provider = _scale_provider(self.parent, self.app)
+        if provider is None:
+            return (family, size, *styles)
+        try:
+            return tuple(provider.font(family, size, *styles))
+        except Exception:
+            return (family, size, *styles)
+
+    def _apply_scale(self) -> None:
+        """Reaplica tamanhos px apos ``UiScale.on_apply`` (main thread)."""
+        if not hasattr(self, "waveform"):
+            return
+        try:
+            self.waveform.configure(height=self._px(88))
+        except Exception:
+            pass
+        for widget in getattr(self, "_wrap_widgets", ()):
+            try:
+                if widget.winfo_exists():
+                    widget.configure(wraplength=self._px(900))
+            except Exception:
+                pass
+        for widget, family, size in getattr(self, "_text_fonts", ()):
+            try:
+                if widget.winfo_exists():
+                    widget.configure(font=self._font(family, size))
+            except Exception:
+                pass
+        # BACKLOG (F5-W4b2-C1): cachear a imagem BASE (320x180) e reamostrar
+        # por resize, como em tk_scene_tab, evitando reabrir background/logo e
+        # recriar a fonte PIL a cada passo de escala.  Nao implementado: o texto
+        # e desenhado com fonte/coordenadas proporcionais ao fator, entao o
+        # cache exigiria invalidacao por perfil/background/logo e alteraria o
+        # layout das frases fixas.
+        self._update_preview()
+
     # ---- construcao -----------------------------------------------------
     def _register_text(self, widget, key: str):
         """Marca um rotulo traduzivel e o guarda para refresh_language."""
@@ -118,15 +207,20 @@ class ProductionTab:
 
     def build(self, parent) -> None:
         """Monta os widgets de producao dentro do ``parent`` da fachada."""
+        factor = self._factor()
+        self._wrap_widgets: list[object] = []
+        self._text_fonts: list[tuple[object, str, int]] = []
         profile_frame = ttk.Frame(parent)
         profile_frame.pack(fill=X, pady=(0, 8))
         self.profile_label = self._label(profile_frame, "profile", style="Section.TLabel")
         self.profile_label.pack(anchor="w")
-        self.profile_info = ttk.Label(profile_frame, style="Hint.TLabel", wraplength=900)
+        self.profile_info = ttk.Label(profile_frame, style="Hint.TLabel",
+                                      wraplength=round(900 * factor))
+        self._wrap_widgets.append(self.profile_info)
         self.profile_info.pack(anchor="w", pady=(2, 4))
         profile_row = ttk.Frame(profile_frame)
         profile_row.pack(fill=X)
-        names = profiles_api.list_profiles()
+        names = profiles_api.list_profiles(path=getattr(self.app, "profiles_path", None))
         self.profile_box = ttk.Combobox(profile_row, state="readonly", width=36, values=names)
         self.profile_box.pack(side=LEFT)
         if self.active_profile in names:
@@ -138,7 +232,9 @@ class ProductionTab:
 
         self.media_label = self._label(parent, "media", style="Section.TLabel")
         self.media_label.pack(anchor="w")
-        self.media_hint = self._label(parent, "drop", style="Hint.TLabel", wraplength=900)
+        self.media_hint = self._label(parent, "drop", style="Hint.TLabel",
+                                      wraplength=round(900 * factor))
+        self._wrap_widgets.append(self.media_hint)
         self.media_hint.pack(anchor="w", pady=(2, 6))
         media_row = ttk.Frame(parent)
         media_row.pack(fill=X)
@@ -166,21 +262,27 @@ class ProductionTab:
         self.selection_radio.pack(side=LEFT, padx=(20, 0))
         self.range_readout = ttk.Label(range_modes, text="00:00.00 — 00:00.00")
         self.range_readout.pack(side=RIGHT)
-        self.waveform = Canvas(parent, height=88, background="#20242b",
+        self.waveform = Canvas(parent, height=round(88 * factor), background="#20242b",
                                highlightthickness=1, highlightbackground="#555b66")
         self.waveform.pack(fill=X)
         self.waveform.bind("<Button-1>", self._wave_press)
         self.waveform.bind("<B1-Motion>", self._wave_drag)
         self.waveform.bind("<ButtonRelease-1>", self._wave_release)
         self.waveform.bind("<Configure>", lambda _event: self._draw_waveform())
-        self.range_hint = self._label(parent, "range_help", style="Hint.TLabel", wraplength=900)
+        self.range_hint = self._label(parent, "range_help", style="Hint.TLabel",
+                                      wraplength=round(900 * factor))
+        self._wrap_widgets.append(self.range_hint)
         self.range_hint.pack(anchor="w", pady=(4, 0))
 
         self.lyrics_label = self._label(parent, "lyrics", style="Section.TLabel")
         self.lyrics_label.pack(anchor="w", pady=(14, 0))
-        self.lyrics_hint = self._label(parent, "lyrics_hint", style="Hint.TLabel", wraplength=900)
+        self.lyrics_hint = self._label(parent, "lyrics_hint", style="Hint.TLabel",
+                                       wraplength=round(900 * factor))
+        self._wrap_widgets.append(self.lyrics_hint)
         self.lyrics_hint.pack(anchor="w", pady=(2, 4))
-        self.lyrics = Text(parent, height=7, wrap="word", undo=True, font=("Segoe UI", 10))
+        self.lyrics = Text(parent, height=7, wrap="word", undo=True,
+                           font=self._font("Segoe UI", 10))
+        self._text_fonts.append((self.lyrics, "Segoe UI", 10))
         self.lyrics.pack(fill=BOTH, expand=True)
         self.load_button = self._button(parent, "load", self._load_lyrics)
         self.load_button.pack(anchor="e", pady=(5, 0))
@@ -227,7 +329,9 @@ class ProductionTab:
         self.end_hold.grid(row=0, column=6)
         self.end_hold.current(1)
 
-        self.guide = self._label(parent, "guide", style="Hint.TLabel", wraplength=900)
+        self.guide = self._label(parent, "guide", style="Hint.TLabel",
+                                 wraplength=round(900 * factor))
+        self._wrap_widgets.append(self.guide)
         self.guide.pack(fill=X, pady=(10, 6))
         action_row = ttk.Frame(parent)
         action_row.pack(fill=X)
@@ -242,7 +346,9 @@ class ProductionTab:
         self.generate_button.pack(side=RIGHT)
         self.progress = ttk.Progressbar(parent, mode="indeterminate")
         self.progress.pack(fill=X, pady=(7, 0))
-        self.log = Text(parent, height=4, state="disabled", wrap="word", font=("Consolas", 9))
+        self.log = Text(parent, height=4, state="disabled", wrap="word",
+                        font=self._font("Consolas", 9))
+        self._text_fonts.append((self.log, "Consolas", 9))
         self.log.pack(fill=X, pady=(6, 0))
 
         batch = ttk.LabelFrame(parent, text=t("batch_title"), padding=8)
@@ -296,10 +402,14 @@ class ProductionTab:
                      style="Primary.TButton").pack(fill=X, pady=(12, 0))
 
         self._label(batch, "qc_preflight").pack(anchor="w", pady=(8, 0))
-        self.qc_text = Text(batch, height=5, wrap="word", font=("Consolas", 9))
+        self.qc_text = Text(batch, height=5, wrap="word", font=self._font("Consolas", 9))
+        self._text_fonts.append((self.qc_text, "Consolas", 9))
         self.qc_text.pack(fill=X)
 
         self._apply_profile()
+        provider = _scale_provider(parent, self.app)
+        if provider is not None:
+            provider.on_apply(self._apply_scale)
 
     def refresh_language(self, _lang: str | None = None) -> None:
         """Reaplica os rotulos sem tocar em midia, letra, faixa ou perfil."""
@@ -359,18 +469,22 @@ class ProductionTab:
             "end_pad_ms": 500,
             "max_duration_ms": 10000,
         }
-        if self.active_profile not in profiles_api.list_profiles():
+        profiles_path = getattr(self.app, "profiles_path", None)
+        if self.active_profile not in profiles_api.list_profiles(path=profiles_path):
             return timing
-        alignment = profiles_api.profile_settings(self.active_profile)["alignment"]
+        alignment = profiles_api.profile_settings(self.active_profile, path=profiles_path)["alignment"]
         for key in timing:
             timing[key] = int(alignment.get(key, timing[key]))
         return timing
 
     def _apply_profile(self) -> None:
         """Apply the selected profile's timing settings to the controls."""
-        if self.active_profile in profiles_api.list_profiles():
-            profile = profiles_api.get_profile(self.active_profile)
-            alignment = profiles_api.profile_settings(self.active_profile)["alignment"]
+        profiles_path = getattr(self.app, "profiles_path", None)
+        if self.active_profile in profiles_api.list_profiles(path=profiles_path):
+            profile = profiles_api.get_profile(self.active_profile, path=profiles_path)
+            alignment = profiles_api.profile_settings(
+                self.active_profile, path=profiles_path
+            )["alignment"]
             self.max_chars.set(str(alignment.get("max_chars", 30)))
             self.max_duration.set(str(int(alignment.get("max_duration_ms", 10000) / 1000)))
             hold = int(alignment.get("end_pad_ms", 500))
@@ -410,7 +524,8 @@ class ProductionTab:
             if first:
                 bg_path = next((p for p in Path(first).parent.glob("FUNDO*")
                                 if p.suffix.lower() in {".png", ".jpg", ".jpeg"}), None)
-        size = (320, 180)
+        factor = self._factor()
+        size = (round(320 * factor), round(180 * factor))
         try:
             if bg_path and bg_path.is_file():
                 base = Image.open(bg_path).convert("RGB").resize(size)
@@ -428,12 +543,13 @@ class ProductionTab:
             y = int(size[1] * 0.45)
             for line in lines:
                 draw.text((size[0] // 2, y), line, fill=color, font=font, anchor="mm")
-                y += font_size + 4
+                y += font_size + round(4 * factor)
             logo = self.logo_var.get().strip()
             if logo and Path(logo).is_file():
                 mark_image = Image.open(logo).convert("RGBA")
-                mark_image.thumbnail((80, 80))
-                base.paste(mark_image, (size[0] - 88, 8), mark_image)
+                mark_image.thumbnail((round(80 * factor), round(80 * factor)))
+                base.paste(mark_image, (size[0] - round(88 * factor),
+                                        round(8 * factor)), mark_image)
             image = ImageTk.PhotoImage(base)
             self.preview.configure(image=image)
             self.preview.image = image
@@ -489,8 +605,10 @@ class ProductionTab:
         # ``template`` vem do snapshot capturado na thread principal; nunca
         # ler StringVar/widget do Tk a partir da thread do lote.
         template = (template or "").strip() or "{pasta}"
-        name = template.replace("{pasta}", folder.name)
-        if count == 1 and "{pasta}" not in template:
+        # A dica em pt anuncia {pasta}; em en/ko anuncia {folder}.  Aceitar
+        # ambos evita que o token literal apareca no nome do arquivo.
+        name = _replace_folder_tokens(template, folder.name)
+        if count == 1 and "{pasta}" not in template and "{folder}" not in template:
             name = template
         invalid = '<>:"/\\|?*'
         return "".join(ch for ch in name if ch not in invalid).strip() or folder.name

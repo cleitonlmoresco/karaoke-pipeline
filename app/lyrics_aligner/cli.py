@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from . import settings as settings_module
 from .karaoke import (
     KaraokeStyle,
     render_karaoke_ass,
@@ -21,36 +23,119 @@ from .publish import default_output_dir, publish
 from .srt import parse_srt
 from .subtitles import AssStyle
 
+
+# Defaults atuais dos comandos.  Alem de serem a ultima camada de precedencia,
+# servem para detectar flags explicitas quando o resolvedor e chamado fora de
+# ``main`` (sem a marcacao feita a partir de argv).
+_ALIGNMENT_DEFAULTS: dict[str, Any] = {
+    "max_chars": 30,
+    "auto_segment": False,
+    "language": "auto",
+    "model": "small",
+    "no_separate": False,
+    "partial_range": False,
+    "lead_ms": 600,
+    "offset_seconds": 0.0,
+    "range_start": 0.0,
+    "range_end": None,
+    "timeline_anchor": False,
+    "end_pad_ms": 500,
+    "min_duration_ms": 500,
+    "max_duration_ms": 10000,
+    "min_gap_ms": 80,
+}
+
+_STYLE_DEFAULTS: dict[str, Any] = {
+    "font": None,
+    "font_size": None,
+    "primary_color": None,
+    "outline_color": None,
+    "back_color": None,
+    "outline": None,
+    "shadow": None,
+    "alignment": None,
+    "margin_h": None,
+    "margin_v": None,
+    "bold": False,
+}
+
+_KARAOKE_DEFAULTS: dict[str, Any] = {
+    "stanza_mode": "time",
+    "lines_per_slide": 3,
+    "lines_before": 1,
+    "lines_after": 1,
+    "entry_lead_ms": 200,
+    "active_font_size": 0,
+    "scroll_pause_seconds": 2.0,
+    "transition": "fade",
+    "transition_ms": 400,
+    "smooth_fill": None,
+}
+
+_BURN_DEFAULTS: dict[str, Any] = {
+    "preset": "medium",
+    "crf": 18,
+}
+
+
 def _add_alignment_options(command: argparse.ArgumentParser) -> None:
-    command.add_argument("--max-chars", type=int, default=30)
-    command.add_argument("--auto-segment", action="store_true")
+    command.add_argument(
+        "--max-chars", type=int, default=_ALIGNMENT_DEFAULTS["max_chars"]
+    )
+    command.add_argument(
+        "--auto-segment",
+        action="store_true",
+        default=_ALIGNMENT_DEFAULTS["auto_segment"],
+    )
     command.add_argument(
         "--language",
-        default="auto",
+        default=_ALIGNMENT_DEFAULTS["language"],
         help="dominant spoken language code/name, or 'auto' (default)",
     )
-    command.add_argument("--model", default="small")
-    command.add_argument("--no-separate", action="store_true")
+    command.add_argument("--model", default=_ALIGNMENT_DEFAULTS["model"])
+    command.add_argument(
+        "--no-separate",
+        action="store_true",
+        default=_ALIGNMENT_DEFAULTS["no_separate"],
+    )
     command.add_argument(
         "--partial-range",
         action="store_true",
+        default=_ALIGNMENT_DEFAULTS["partial_range"],
         help="locate and align only the lyric span heard in this audio range",
     )
-    command.add_argument("--lead-ms", type=int, default=600)
-    command.add_argument("--offset-seconds", type=float, default=0.0)
-    command.add_argument("--range-start", type=float, default=0.0)
-    command.add_argument("--range-end", type=float)
-    command.add_argument("--timeline-anchor", action="store_true")
-    command.add_argument("--end-pad-ms", type=int, default=500)
-    command.add_argument("--min-duration-ms", type=int, default=500)
-    command.add_argument("--max-duration-ms", type=int, default=10000)
-    command.add_argument("--min-gap-ms", type=int, default=80)
+    command.add_argument(
+        "--lead-ms", type=int, default=_ALIGNMENT_DEFAULTS["lead_ms"]
+    )
+    command.add_argument(
+        "--offset-seconds", type=float, default=_ALIGNMENT_DEFAULTS["offset_seconds"]
+    )
+    command.add_argument(
+        "--range-start", type=float, default=_ALIGNMENT_DEFAULTS["range_start"]
+    )
+    command.add_argument("--range-end", type=float, default=_ALIGNMENT_DEFAULTS["range_end"])
+    command.add_argument(
+        "--timeline-anchor",
+        action="store_true",
+        default=_ALIGNMENT_DEFAULTS["timeline_anchor"],
+    )
+    command.add_argument(
+        "--end-pad-ms", type=int, default=_ALIGNMENT_DEFAULTS["end_pad_ms"]
+    )
+    command.add_argument(
+        "--min-duration-ms", type=int, default=_ALIGNMENT_DEFAULTS["min_duration_ms"]
+    )
+    command.add_argument(
+        "--max-duration-ms", type=int, default=_ALIGNMENT_DEFAULTS["max_duration_ms"]
+    )
+    command.add_argument(
+        "--min-gap-ms", type=int, default=_ALIGNMENT_DEFAULTS["min_gap_ms"]
+    )
     command.add_argument("--debug-json", type=Path)
 
 
-# Nomes de flags do comando ``align`` que controlam o alinhamento.  Usados
-# para detectar o que foi passado explicitamente na linha de comando: um perfil
-# so preenche o que o chamador nao escolheu.
+# chave resolvida -> flag da CLI.  Uma flag explicitamente presente vence o
+# perfil; o perfil so preenche o que o chamador nao escolheu.
 _ALIGNMENT_FLAGS: dict[str, str] = {
     "max_chars": "--max-chars",
     "auto_segment": "--auto-segment",
@@ -69,63 +154,289 @@ _ALIGNMENT_FLAGS: dict[str, str] = {
     "min_gap_ms": "--min-gap-ms",
 }
 
-# kwarg de align_to_srt -> (chave em settings["alignment"], conversor)
-_PROFILE_ALIGNMENT_KEYS: dict[str, tuple[str, Any]] = {
-    "max_chars": ("max_chars", int),
-    "auto_segment": ("mode", lambda value: str(value) != "manual"),
-    "language": ("language", str),
-    "model_name": ("model", str),
-    "separate": ("separate", bool),
-    "lead_ms": ("lead_ms", int),
-    "offset_seconds": ("offset_seconds", float),
-    "range_start_seconds": ("range_start", float),
-    "range_end_seconds": ("range_end", lambda value: None if value is None else float(value)),
-    "end_pad_ms": ("end_pad_ms", int),
-    "min_duration_ms": ("min_duration_ms", int),
-    "max_duration_ms": ("max_duration_ms", int),
-    "min_gap_ms": ("min_gap_ms", int),
+_STYLE_FLAGS: dict[str, str] = {
+    "font_name": "--font",
+    "font_size": "--font-size",
+    "primary_color": "--primary-color",
+    "outline_color": "--outline-color",
+    "back_color": "--back-color",
+    "bold": "--bold",
+    "outline": "--outline",
+    "shadow": "--shadow",
+    "alignment": "--alignment",
+    "margin_h": "--margin-h",
+    "margin_v": "--margin-v",
 }
 
+_KARAOKE_FLAGS: dict[str, str] = {
+    "stanza_mode": "--stanza-mode",
+    "lines_per_slide": "--lines-per-slide",
+    "lines_before": "--lines-before",
+    "lines_after": "--lines-after",
+    "entry_lead_ms": "--entry-lead-ms",
+    "active_font_size": "--active-font-size",
+    "scroll_pause_seconds": "--scroll-pause-seconds",
+    "transition": "--transition",
+    "transition_ms": "--transition-ms",
+    "smooth_fill": "--smooth-fill",
+}
 
-def _explicit_alignment_flags(argv: list[str]) -> set[str]:
-    """Flags de alinhamento presentes literalmente em ``argv``."""
-    tokens = set(argv)
-    found = set()
-    for flag in _ALIGNMENT_FLAGS.values():
-        if flag in tokens or any(token.startswith(flag + "=") for token in tokens):
-            found.add(flag)
-    return found
+# Chaves que so podem vir do perfil (nao ha flag correspondente na CLI).
+_PROFILE_ONLY_KEYS: tuple[str, ...] = ("active_color",)
+
+# chave resolvida -> atributo do argparse, quando diferente da chave.
+_ARG_ATTRS: dict[str, str] = {
+    "font_name": "font",
+    "model_name": "model",
+}
+
+# chave resolvida -> (secao do perfil, chave, conversor)
+_PROFILE_KEY_SPECS: dict[str, tuple[str, str, Any]] = {
+    # alinhamento
+    "max_chars": ("alignment", "max_chars", int),
+    "auto_segment": ("alignment", "mode", lambda value: str(value) != "manual"),
+    "language": ("alignment", "language", str),
+    "model_name": ("alignment", "model", str),
+    "separate": ("alignment", "separate", bool),
+    "lead_ms": ("alignment", "lead_ms", int),
+    "offset_seconds": ("alignment", "offset_seconds", float),
+    "range_start_seconds": ("alignment", "range_start", float),
+    "range_end_seconds": (
+        "alignment",
+        "range_end",
+        lambda value: None if value is None else float(value),
+    ),
+    "end_pad_ms": ("alignment", "end_pad_ms", int),
+    "min_duration_ms": ("alignment", "min_duration_ms", int),
+    "max_duration_ms": ("alignment", "max_duration_ms", int),
+    "min_gap_ms": ("alignment", "min_gap_ms", int),
+    # estilo / ASS (secao karaoke do perfil)
+    "font_name": ("karaoke", "font_name", str),
+    "font_size": ("karaoke", "font_size", int),
+    "primary_color": ("karaoke", "normal_color", str),
+    "active_color": ("karaoke", "active_color", str),
+    "outline_color": ("karaoke", "outline_color", str),
+    "back_color": ("karaoke", "back_color", str),
+    "bold": ("karaoke", "bold", bool),
+    "outline": ("karaoke", "outline", float),
+    "shadow": ("karaoke", "shadow", float),
+    "alignment": ("karaoke", "alignment", int),
+    "margin_h": ("karaoke", "margin_h", int),
+    "margin_v": ("karaoke", "margin_v", int),
+    # karaoke
+    "stanza_mode": ("karaoke", "stanza_mode", str),
+    "lines_per_slide": ("karaoke", "lines_per_slide", int),
+    "lines_before": ("karaoke", "lines_before", int),
+    "lines_after": ("karaoke", "lines_after", int),
+    "entry_lead_ms": ("karaoke", "entry_lead_ms", int),
+    "active_font_size": ("karaoke", "active_font_size", int),
+    "scroll_pause_seconds": ("karaoke", "scroll_pause_seconds", float),
+    "transition": ("karaoke", "transition", str),
+    "transition_ms": ("karaoke", "transition_ms", int),
+    "smooth_fill": ("karaoke", "smooth_fill", bool),
+    # saida
+    "fps": ("output", "fps", int),
+    # burn (publish)
+    "preset": ("burn", "preset", str),
+    "crf": ("burn", "crf", int),
+}
+
+_EXPLICIT_FLAGS_ATTR = "_cli_explicit_flags"
+_MISSING = object()
+_ALIASES: dict[str, str] = {"--no-smooth-fill": "--smooth-fill"}
+_EXTRA_KEYS: tuple[str, ...] = (
+    "partial_range",
+    "timeline_anchor",
+    "debug_json",
+    "fps",
+)
 
 
-def _alignment_kwargs(args: argparse.Namespace, argv: list[str]) -> dict[str, Any]:
-    """Kwargs de ``align_to_srt``, com perfil como base e CLI por cima."""
-    kwargs: dict[str, Any] = {
-        "max_chars": args.max_chars,
-        "auto_segment": args.auto_segment,
-        "language": args.language,
-        "separate": not args.no_separate,
-        "partial_range": args.partial_range,
-        "model_name": args.model,
-        "lead_ms": args.lead_ms,
-        "offset_seconds": args.offset_seconds,
-        "range_start_seconds": args.range_start,
-        "range_end_seconds": args.range_end,
-        "timeline_anchor": args.timeline_anchor,
-        "end_pad_ms": args.end_pad_ms,
-        "min_duration_ms": args.min_duration_ms,
-        "max_duration_ms": args.max_duration_ms,
-        "min_gap_ms": args.min_gap_ms,
-        "debug_json": args.debug_json,
-    }
-    profile_name = getattr(args, "profile", None)
-    if not profile_name:
-        return kwargs
-    profile_align = profile_settings_by_name(profile_name).get("alignment") or {}
-    explicit = _explicit_alignment_flags(argv)
-    for kwarg, (key, convert) in _PROFILE_ALIGNMENT_KEYS.items():
-        if _ALIGNMENT_FLAGS[kwarg] in explicit or key not in profile_align:
+def _all_cli_flags() -> set[str]:
+    flags = set(_ALIGNMENT_FLAGS.values()) | set(_STYLE_FLAGS.values())
+    flags |= set(_KARAOKE_FLAGS.values())
+    flags |= set(_ALIASES)
+    flags.update(("--fps", "--profile", "--preset", "--crf"))
+    return flags
+
+
+def _mark_explicit_flags(args: argparse.Namespace, argv: list[str]) -> None:
+    """Registra em ``args`` quais flags vieram da linha de comando.
+
+    Alem das flags literais (inclusive ``--flag=valor``), reconhece as
+    abreviacoes aceitas pelo argparse: um token ``--xxx`` que nao seja uma flag
+    exata e seja prefixo de uma unica flag conhecida marca essa flag canonica.
+    Prefixos ambiguos sao ignorados (o proprio argparse os rejeitaria).
+    """
+    known = _all_cli_flags()
+    explicit: set[str] = set()
+    for raw in {str(token) for token in argv}:
+        if not raw.startswith("--"):
             continue
-        kwargs[kwarg] = convert(profile_align[key])
+        name = raw.split("=", 1)[0]
+        if name in known:
+            explicit.add(name)
+            continue
+        matches = [flag for flag in known if flag.startswith(name)]
+        if len(matches) == 1:
+            explicit.add(matches[0])
+    setattr(args, _EXPLICIT_FLAGS_ATTR, explicit)
+
+
+def _default_for(args: argparse.Namespace, attr: str) -> Any:
+    command = getattr(args, "command", None)
+    if command in ("align", "publish"):
+        value = _ALIGNMENT_DEFAULTS.get(attr, _STYLE_DEFAULTS.get(attr))
+        return _BURN_DEFAULTS.get(attr, value) if command == "publish" else value
+    if command == "karaoke":
+        return _KARAOKE_DEFAULTS.get(attr, _STYLE_DEFAULTS.get(attr))
+    for table in (_ALIGNMENT_DEFAULTS, _KARAOKE_DEFAULTS, _STYLE_DEFAULTS):
+        if attr in table:
+            return table[attr]
+    return None
+
+
+def _flag_explicit(args: argparse.Namespace, key: str, flag: str) -> bool:
+    marked = getattr(args, _EXPLICIT_FLAGS_ATTR, None)
+    if isinstance(marked, (set, frozenset, list, tuple)):
+        return flag in marked or any(
+            alias == flag and original in marked
+            for original, alias in _ALIASES.items()
+        )
+    attr = _ARG_ATTRS.get(key, key)
+    # ``--no-separate`` e a flag canonica de ``separate``; o namespace guarda o
+    # valor invertido em ``no_separate`` (sem atributo ``separate``).
+    if key == "separate" and getattr(args, "no_separate", False) is True:
+        return True
+    current = getattr(args, attr, _MISSING)
+    return current is not _MISSING and current != _default_for(args, attr)
+
+
+def _active_profile_name() -> str | None:
+    """Perfil ativo: settings.json.profile, senao profiles.json.active."""
+    try:
+        name = settings_module.get_setting("profile", None)
+    except (OSError, ValueError):
+        name = None
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    try:
+        active = load_profiles().get("active")
+    except (OSError, ValueError):
+        active = None
+    if isinstance(active, str) and active.strip():
+        return active.strip()
+    return None
+
+
+def _resolve_profile_name(args: argparse.Namespace) -> tuple[str | None, bool]:
+    """Retorna (nome do perfil, veio de --profile)."""
+    explicit = getattr(args, "profile", None)
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip(), True
+    return _active_profile_name(), False
+
+
+def resolve_profile_settings(
+    args: argparse.Namespace, *, explicit_flags: dict[str, str]
+) -> dict[str, Any]:
+    """Resolver opcoes efetivas com precedencia uniforme.
+
+    Ordem: (a) flag explicitamente presente na CLI; (b) ``--profile NOME``;
+    (c) perfil ativo de settings.json (com fallback a profiles.json.active);
+    (d) defaults atuais do comando.  Nenhum arquivo e gravado.
+    """
+    resolved: dict[str, Any] = {
+        key: getattr(args, _ARG_ATTRS.get(key, key), None)
+        for key in _PROFILE_KEY_SPECS
+    }
+    for key in _EXTRA_KEYS:
+        if hasattr(args, key):
+            resolved[key] = getattr(args, key)
+    if hasattr(args, "no_separate"):
+        resolved["separate"] = not args.no_separate
+    if resolved.get("active_color") is None:
+        resolved["active_color"] = resolved.get("primary_color")
+
+    profile_name, explicit = _resolve_profile_name(args)
+    resolved["_profile_name"] = profile_name
+    if not profile_name:
+        return resolved
+    try:
+        settings_data = profile_settings_by_name(profile_name)
+    except ValueError:
+        if explicit:
+            raise
+        print(
+            f"AVISO: perfil ativo '{profile_name}' nao encontrado; "
+            "usando os valores padrao do comando.",
+            file=sys.stderr,
+        )
+        resolved["_profile_name"] = None
+        return resolved
+
+    sections: dict[str, Mapping[str, Any]] = {
+        "alignment": settings_data.get("alignment") or {},
+        "karaoke": settings_data.get("karaoke") or {},
+        "output": settings_data.get("output") or {},
+        "burn": settings_data.get("burn") or {},
+    }
+    keys = list(dict.fromkeys([*explicit_flags, *_PROFILE_ONLY_KEYS]))
+    for key in keys:
+        flag = explicit_flags.get(key)
+        if flag and _flag_explicit(args, key, flag):
+            continue
+        spec = _PROFILE_KEY_SPECS.get(key)
+        if spec is None:
+            continue
+        section, profile_key, convert = spec
+        values = sections.get(section) or {}
+        if profile_key not in values or values[profile_key] is None:
+            continue
+        try:
+            resolved[key] = convert(values[profile_key])
+        except (TypeError, ValueError):
+            print(
+                f"AVISO: valor invalido para {section}.{profile_key} no perfil "
+                f"'{profile_name}'; mantenho o valor anterior.",
+                file=sys.stderr,
+            )
+    return resolved
+
+
+def _resolved_value(resolved: Mapping[str, Any], key: str, default: Any) -> Any:
+    value = resolved.get(key)
+    return default if value is None else value
+
+
+def _alignment_kwargs(
+    args: argparse.Namespace, argv: list[str] | None = None
+) -> dict[str, Any]:
+    """Kwargs de ``align_to_srt``, com perfil como base e CLI por cima."""
+    # Sem argv nao ha como saber quais flags foram dadas: marcar uma lista vazia
+    # apagaria o fallback de _flag_explicit e o estado ja resolvido em args.
+    if argv is not None and not hasattr(args, _EXPLICIT_FLAGS_ATTR):
+        _mark_explicit_flags(args, argv)
+    resolved = resolve_profile_settings(args, explicit_flags=_ALIGNMENT_FLAGS)
+    keys = (
+        "max_chars",
+        "auto_segment",
+        "language",
+        "separate",
+        "partial_range",
+        "model_name",
+        "lead_ms",
+        "offset_seconds",
+        "range_start_seconds",
+        "range_end_seconds",
+        "timeline_anchor",
+        "end_pad_ms",
+        "min_duration_ms",
+        "max_duration_ms",
+        "min_gap_ms",
+    )
+    kwargs = {key: resolved[key] for key in keys}
+    kwargs["debug_json"] = resolved.get("debug_json")
     return kwargs
 
 
@@ -146,6 +457,45 @@ def _add_ass_style_options(command: argparse.ArgumentParser) -> None:
     command.add_argument("--margin-h", type=int, help="left/right margin")
     command.add_argument("--margin-v", type=int, help="vertical margin")
     command.add_argument("--bold", action="store_true")
+
+
+def _fps_arg(value: str) -> int:
+    """``argparse`` converter for ``--fps``: inteiro em 1..120 (default: perfil)."""
+    try:
+        fps = int(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(
+            f"FPS invalido: {value!r}. Use um inteiro entre 1 e 120."
+        ) from exc
+    if not 1 <= fps <= 120:
+        raise argparse.ArgumentTypeError(
+            f"FPS deve estar entre 1 e 120 (recebido: {fps})."
+        )
+    return fps
+
+
+def _add_fps_option(command: argparse.ArgumentParser) -> None:
+    command.add_argument(
+        "--fps",
+        type=_fps_arg,
+        default=None,
+        help="output frames per second, 1-120 (default: profile/settings, 30)",
+    )
+
+
+def _settings_fps(args: argparse.Namespace, fallback: int = 30) -> int:
+    """FPS efetivo: a CLI quando informada, senao o do perfil ativo/settings."""
+    if getattr(args, "fps", None) is not None:
+        return int(args.fps)
+    profile_name, _ = _resolve_profile_name(args)
+    if profile_name:
+        try:
+            return int(
+                profile_settings_by_name(profile_name).get("output", {}).get("fps", fallback)
+            )
+        except (ValueError, TypeError, KeyError):
+            pass
+    return fallback
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -203,6 +553,7 @@ def build_parser() -> argparse.ArgumentParser:
     make_command.add_argument("--transition-duration", type=float, default=0.4)
     make_command.add_argument("--make-playback", action="store_true",
                               help="derive instrumental playback with Demucs")
+    _add_fps_option(make_command)
 
     for name in ("align", "demo"):
         command = subparsers.add_parser(name)
@@ -235,6 +586,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-dir",
         type=Path,
         help="package folder (default: <media>_lyrics beside the source)",
+    )
+    publish_command.add_argument(
+        "--profile",
+        help="aplicar as configuracoes de um perfil salvo (default: perfil ativo)",
     )
     _add_alignment_options(publish_command)
     publish_command.add_argument("--title", help="title stored in the ASS and manifest")
@@ -271,6 +626,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=18,
         help="x264 quality from 0 (best) to 51 (smallest), default: 18",
     )
+    _add_fps_option(publish_command)
 
     karaoke_command = subparsers.add_parser(
         "karaoke",
@@ -279,65 +635,95 @@ def build_parser() -> argparse.ArgumentParser:
     karaoke_command.add_argument("srt", type=Path, help="aligned lyrics SRT")
     karaoke_command.add_argument("lyrics", type=Path, help="original lyrics (with blank-line stanzas)")
     karaoke_command.add_argument("-o", "--output", type=Path, required=True)
-    karaoke_command.add_argument("--profile", help="apply a saved karaoke profile")
+    karaoke_command.add_argument(
+        "--profile",
+        help="aplicar um perfil salvo (default: perfil ativo de settings.json)",
+    )
     karaoke_command.add_argument(
         "--stanza-mode",
         choices=("time", "stanzas"),
-        default="time",
+        default=_KARAOKE_DEFAULTS["stanza_mode"],
         help=(
             "time: verses up to 6 s apart share a slide; "
             "stanzas: blank lines in the lyrics split stanzas (6 s still applies)"
         ),
     )
-    karaoke_command.add_argument("--lines-per-slide", type=int, default=3)
-    karaoke_command.add_argument("--lines-before", type=int, default=1)
-    karaoke_command.add_argument("--lines-after", type=int, default=1)
-    karaoke_command.add_argument("--entry-lead-ms", type=int, default=200)
-    karaoke_command.add_argument("--active-font-size", type=int, default=0)
-    karaoke_command.add_argument("--scroll-pause-seconds", type=float, default=2.0)
+    karaoke_command.add_argument(
+        "--lines-per-slide", type=int, default=_KARAOKE_DEFAULTS["lines_per_slide"]
+    )
+    karaoke_command.add_argument(
+        "--lines-before", type=int, default=_KARAOKE_DEFAULTS["lines_before"]
+    )
+    karaoke_command.add_argument(
+        "--lines-after", type=int, default=_KARAOKE_DEFAULTS["lines_after"]
+    )
+    karaoke_command.add_argument(
+        "--entry-lead-ms", type=int, default=_KARAOKE_DEFAULTS["entry_lead_ms"]
+    )
+    karaoke_command.add_argument(
+        "--active-font-size", type=int, default=_KARAOKE_DEFAULTS["active_font_size"]
+    )
+    karaoke_command.add_argument(
+        "--scroll-pause-seconds",
+        type=float,
+        default=_KARAOKE_DEFAULTS["scroll_pause_seconds"],
+    )
     karaoke_command.add_argument(
         "--transition",
-        default="fade",
+        default=_KARAOKE_DEFAULTS["transition"],
         choices=("none", "scroll", "fade", "up", "down"),
     )
-    karaoke_command.add_argument("--transition-ms", type=int, default=400)
+    karaoke_command.add_argument(
+        "--transition-ms", type=int, default=_KARAOKE_DEFAULTS["transition_ms"]
+    )
+    karaoke_command.add_argument(
+        "--smooth-fill/--no-smooth-fill",
+        action=argparse.BooleanOptionalAction,
+        dest="smooth_fill",
+        default=_KARAOKE_DEFAULTS["smooth_fill"],
+        help="preenchimento gradual da silaba ativa (default: perfil)",
+    )
     _add_ass_style_options(karaoke_command)
     return parser
 
 
-def _ass_style(args: argparse.Namespace) -> AssStyle:
+def _ass_style(
+    args: argparse.Namespace, resolved: Mapping[str, Any] | None = None
+) -> AssStyle:
+    """Estilo ASS efetivo; ``resolved`` (quando dado) vem do resolvedor."""
+    values = resolved or {}
     defaults = AssStyle()
+
+    def pick(key: str, attr: str, fallback: Any) -> Any:
+        return _resolved_value(values, key, getattr(args, attr, fallback))
+
     return AssStyle(
-        font_name=args.font if args.font is not None else defaults.font_name,
-        font_size=(
-            args.font_size if args.font_size is not None else defaults.font_size
-        ),
-        primary_color=(
-            args.primary_color
-            if args.primary_color is not None
-            else defaults.primary_color
-        ),
-        outline_color=(
-            args.outline_color
-            if args.outline_color is not None
-            else defaults.outline_color
-        ),
-        back_color=(
-            args.back_color if args.back_color is not None else defaults.back_color
-        ),
-        bold=args.bold,
-        outline=args.outline if args.outline is not None else defaults.outline,
-        shadow=args.shadow if args.shadow is not None else defaults.shadow,
-        alignment=(
-            args.alignment if args.alignment is not None else defaults.alignment
-        ),
-        margin_l=args.margin_h if args.margin_h is not None else defaults.margin_l,
-        margin_r=args.margin_h if args.margin_h is not None else defaults.margin_r,
-        margin_v=args.margin_v if args.margin_v is not None else defaults.margin_v,
+        font_name=pick("font_name", "font", defaults.font_name),
+        font_size=pick("font_size", "font_size", defaults.font_size),
+        primary_color=pick("primary_color", "primary_color", defaults.primary_color),
+        outline_color=pick("outline_color", "outline_color", defaults.outline_color),
+        back_color=pick("back_color", "back_color", defaults.back_color),
+        bold=pick("bold", "bold", defaults.bold),
+        outline=pick("outline", "outline", defaults.outline),
+        shadow=pick("shadow", "shadow", defaults.shadow),
+        alignment=pick("alignment", "alignment", defaults.alignment),
+        margin_l=pick("margin_h", "margin_h", defaults.margin_l),
+        margin_r=pick("margin_h", "margin_h", defaults.margin_r),
+        margin_v=pick("margin_v", "margin_v", defaults.margin_v),
     )
 
 
-def _run_publish(args: argparse.Namespace) -> int:
+def _run_publish(args: argparse.Namespace, argv: list[str] | None = None) -> int:
+    if argv is not None:
+        _mark_explicit_flags(args, argv)
+    flags = {
+        **_ALIGNMENT_FLAGS,
+        **_STYLE_FLAGS,
+        "fps": "--fps",
+        "preset": "--preset",
+        "crf": "--crf",
+    }
+    resolved = resolve_profile_settings(args, explicit_flags=flags)
     lyrics_text = args.lyrics.read_text(encoding="utf-8-sig")
     output_dir = args.output_dir or default_output_dir(args.media)
     messages: list[str] = []
@@ -347,28 +733,14 @@ def _run_publish(args: argparse.Namespace) -> int:
         output_dir,
         lyrics_path=args.lyrics,
         title=args.title,
-        style=_ass_style(args),
+        style=_ass_style(args, resolved),
         burn=args.burn,
         ffmpeg=args.ffmpeg,
-        preset=args.preset,
-        crf=args.crf,
+        preset=_resolved_value(resolved, "preset", args.preset),
+        crf=_resolved_value(resolved, "crf", args.crf),
+        fps=resolved.get("fps"),
         align_options={
-            "max_chars": args.max_chars,
-            "auto_segment": args.auto_segment,
-            "language": args.language,
-            "separate": not args.no_separate,
-            "partial_range": args.partial_range,
-            "model_name": args.model,
-            "lead_ms": args.lead_ms,
-            "offset_seconds": args.offset_seconds,
-            "range_start_seconds": args.range_start,
-            "range_end_seconds": args.range_end,
-            "timeline_anchor": args.timeline_anchor,
-            "end_pad_ms": args.end_pad_ms,
-            "min_duration_ms": args.min_duration_ms,
-            "max_duration_ms": args.max_duration_ms,
-            "min_gap_ms": args.min_gap_ms,
-            "debug_json": args.debug_json,
+            **_alignment_kwargs(args, argv),
             "messages": messages,
         },
         progress=lambda message: print(message, flush=True),
@@ -384,53 +756,59 @@ def _run_publish(args: argparse.Namespace) -> int:
     return 0
 
 
-def _run_karaoke(args: argparse.Namespace) -> int:
+def _run_karaoke(args: argparse.Namespace, argv: list[str] | None = None) -> int:
+    if argv is not None:
+        _mark_explicit_flags(args, argv)
+    resolved = resolve_profile_settings(
+        args, explicit_flags={**_STYLE_FLAGS, **_KARAOKE_FLAGS}
+    )
     cues = parse_srt(args.srt.read_text(encoding="utf-8-sig"))
     if not cues:
         raise ValueError("O SRT não contém legendas.")
     lyrics_text = args.lyrics.read_text(encoding="utf-8-sig")
-    profile = None
-    if getattr(args, "profile", None):
-        profile = load_profiles().get("profiles", {}).get(args.profile)
-        if profile is None:
-            raise ValueError(
-                f"Perfil '{args.profile}' nao encontrado. "
-                "Use 'lyrics-aligner profiles' para listar."
-            )
-    kp = (profile or {}).get("settings", {}).get("karaoke", {})
-
-    def pick(key: str, default):
-        return kp.get(key, default)
 
     base = _ass_style(args)
-    stanza_mode = pick("stanza_mode", args.stanza_mode)
+    stanza_mode = _resolved_value(resolved, "stanza_mode", args.stanza_mode)
     boundaries = (
         stanza_boundaries_from_lyrics(lyrics_text, cues)
         if stanza_mode == "stanzas"
         else frozenset()
     )
     style = KaraokeStyle(
-        font_name=pick("font_name", base.font_name),
-        font_size=pick("font_size", base.font_size),
-        normal_color=pick("normal_color", base.primary_color),
-        active_color=pick("active_color", base.primary_color),
-        outline_color=pick("outline_color", base.outline_color),
-        back_color=pick("back_color", base.back_color),
-        bold=pick("bold", base.bold),
-        outline=pick("outline", base.outline),
-        shadow=pick("shadow", base.shadow),
-        alignment=pick("alignment", base.alignment),
-        margin_l=pick("margin_h", base.margin_l),
-        margin_r=pick("margin_h", base.margin_r),
-        margin_v=pick("margin_v", base.margin_v),
-        lines_per_slide=pick("lines_per_slide", args.lines_per_slide),
-        lines_before=pick("lines_before", args.lines_before),
-        lines_after=pick("lines_after", args.lines_after),
-        entry_lead_ms=args.entry_lead_ms,
-        active_font_size=pick("active_font_size", args.active_font_size),
-        scroll_pause_seconds=pick("scroll_pause_seconds", args.scroll_pause_seconds),
-        transition=pick("transition", args.transition),
-        transition_ms=pick("transition_ms", args.transition_ms),
+        font_name=_resolved_value(resolved, "font_name", base.font_name),
+        font_size=_resolved_value(resolved, "font_size", base.font_size),
+        normal_color=_resolved_value(resolved, "primary_color", base.primary_color),
+        active_color=_resolved_value(resolved, "active_color", base.primary_color),
+        outline_color=_resolved_value(resolved, "outline_color", base.outline_color),
+        back_color=_resolved_value(resolved, "back_color", base.back_color),
+        bold=_resolved_value(resolved, "bold", base.bold),
+        outline=_resolved_value(resolved, "outline", base.outline),
+        shadow=_resolved_value(resolved, "shadow", base.shadow),
+        alignment=_resolved_value(resolved, "alignment", base.alignment),
+        margin_l=_resolved_value(resolved, "margin_h", base.margin_l),
+        margin_r=_resolved_value(resolved, "margin_h", base.margin_r),
+        margin_v=_resolved_value(resolved, "margin_v", base.margin_v),
+        lines_per_slide=_resolved_value(
+            resolved, "lines_per_slide", args.lines_per_slide
+        ),
+        lines_before=_resolved_value(resolved, "lines_before", args.lines_before),
+        lines_after=_resolved_value(resolved, "lines_after", args.lines_after),
+        entry_lead_ms=_resolved_value(
+            resolved, "entry_lead_ms", args.entry_lead_ms
+        ),
+        active_font_size=_resolved_value(
+            resolved, "active_font_size", args.active_font_size
+        ),
+        scroll_pause_seconds=_resolved_value(
+            resolved, "scroll_pause_seconds", args.scroll_pause_seconds
+        ),
+        transition=_resolved_value(resolved, "transition", args.transition),
+        transition_ms=_resolved_value(resolved, "transition_ms", args.transition_ms),
+        smooth_fill=_resolved_value(
+            resolved,
+            "smooth_fill",
+            True if getattr(args, "smooth_fill", None) is None else args.smooth_fill,
+        ),
         stanza_boundaries=boundaries,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -438,8 +816,13 @@ def _run_karaoke(args: argparse.Namespace) -> int:
         render_karaoke_ass(cues, title=args.srt.stem, style=style),
         encoding="utf-8",
     )
-    if profile:
-        print(f"Perfil: {profile.get('name', args.profile)}")
+    profile_name = resolved.get("_profile_name")
+    if profile_name:
+        display = (
+            (load_profiles().get("profiles", {}).get(profile_name) or {}).get("name")
+            or profile_name
+        )
+        print(f"Perfil: {display}")
     print(f"Karaoke ASS: {args.output}")
     print(f"Modo de estrofes: {stanza_mode} ({len(boundaries)} quebra(s))")
     return 0
@@ -448,9 +831,10 @@ def _run_karaoke(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     effective_argv = list(sys.argv[1:] if argv is None else argv)
     args = build_parser().parse_args(effective_argv)
+    _mark_explicit_flags(args, effective_argv)
     try:
         if args.command == "karaoke":
-            return _run_karaoke(args)
+            return _run_karaoke(args, effective_argv)
         if args.command == "audio":
             if args.analyze:
                 print(json.dumps(analyze(args.media), ensure_ascii=False, indent=2))
@@ -486,6 +870,7 @@ def main(argv: list[str] | None = None) -> int:
                 transition=args.transition,
                 transition_duration=args.transition_duration,
                 make_playback_from_media=args.make_playback,
+                fps=args.fps,
             )
             if args.scene:
                 scene = load_scene(args.scene)
@@ -496,7 +881,8 @@ def main(argv: list[str] | None = None) -> int:
                 for item in list(report.get("outputs", [])):
                     source = Path(item)
                     compiled = source.with_name(source.stem + " - cena.mp4")
-                    compile_scene(scene=scene, video=source, output=compiled, work=work)
+                    compile_scene(scene=scene, video=source, output=compiled, work=work,
+                                  fps=_settings_fps(args))
                     report["outputs"].append(str(compiled))
             print(json.dumps(report, ensure_ascii=False, indent=2))
             return 0
@@ -519,7 +905,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"duration": duration, "peaks": peaks}, separators=(",", ":")))
             return 0
         if args.command == "publish":
-            return _run_publish(args)
+            return _run_publish(args, effective_argv)
         lyrics_text = args.lyrics.read_text(encoding="utf-8-sig")
         messages: list[str] = []
         if args.command == "demo":

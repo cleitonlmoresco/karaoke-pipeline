@@ -37,6 +37,35 @@ APP_NAME = "Vilm Lyrics Aligner"
 AUTOSAVE_PATH = application_data_root() / "scene-autosave.json"
 
 
+def _scale_provider(widget, app=None) -> object | None:
+    """Localiza o ``UiScale`` do toplevel, com espelho da fachada legada."""
+    try:
+        toplevel = widget.winfo_toplevel()
+    except Exception:
+        return None
+    provider = getattr(toplevel, "ui_scale", None)
+    if provider is None and app is not None:
+        provider = getattr(app, "ui_scale", None)
+        if provider is not None:
+            try:
+                setattr(toplevel, "ui_scale", provider)
+            except Exception:
+                pass
+    return provider
+
+
+def _scale_factor(widget, app=None) -> float:
+    """Fator atual, com fallback neutro (1.0) quando nao ha provider."""
+    provider = _scale_provider(widget, app)
+    if provider is None:
+        return 1.0
+    try:
+        value = float(provider.factor())
+    except Exception:
+        return 1.0
+    return value if value > 0 else 1.0
+
+
 class SceneTab:
     """Secao de cena da aba de producao (Karaoke)."""
 
@@ -69,8 +98,36 @@ class SceneTab:
         return self._register_text(
             Checkbutton(parent, text=t(key), variable=variable, **kwargs), key)
 
+    # ---- escala visual ---------------------------------------------------
+    def _factor(self) -> float:
+        return _scale_factor(self.parent, self.app)
+
+    def _px(self, base: float) -> int:
+        return max(1, round(float(base) * self._factor()))
+
+    def _configure_scene_canvas(self) -> None:
+        """Aplica o tamanho BASE 480x270 (por formato) ja multiplicado por f."""
+        cw, ch, _sx, _sy = self._scene_view()
+        f = self._factor()
+        self.scene_canvas.configure(width=round(cw * f), height=round(ch * f))
+
+    def _apply_scale(self) -> None:
+        """Reaplica canvas/previa apos ``UiScale.on_apply`` (main thread).
+
+        Nao ha renderizacao nem autosave aqui: apenas redesenho a partir das
+        coordenadas BASE e reamostro a imagem de previa ja em memoria.
+        """
+        if not hasattr(self, "scene_canvas"):
+            return
+        try:
+            self._scene_redraw(autosave=False)
+        except Exception:
+            pass
+        self._show_preview_scaled()
+
     def build(self, parent) -> None:
         """Monta o LabelFrame de cena dentro do parent fornecido por DesktopApp."""
+        factor = self._factor()
         scene_frame = ttk.LabelFrame(parent, text=t("scene_title"), padding=8)
         self.scene_frame = scene_frame
         self._register_text(scene_frame, "scene_title")
@@ -106,7 +163,8 @@ class SceneTab:
         self.format_box.bind("<<ComboboxSelected>>", self._scene_format_changed)
 
         stage = ttk.Frame(scene_frame); stage.pack(fill=X, pady=(6, 0))
-        self.scene_canvas = Canvas(stage, width=480, height=270,
+        self.scene_canvas = Canvas(stage, width=round(480 * factor),
+                                   height=round(270 * factor),
                                    background="#1a1d24", highlightthickness=1,
                                    highlightbackground="#555b66")
         self.scene_canvas.pack(side=LEFT)
@@ -143,8 +201,9 @@ class SceneTab:
             row=2, column=0, columnspan=12, pady=(6, 0))
         props.columnconfigure(11, weight=1)
 
-        self.timeline = Canvas(scene_frame, height=90, background="#252932",
-                               highlightthickness=1, highlightbackground="#555b66")
+        self.timeline = Canvas(scene_frame, height=round(90 * factor),
+                               background="#252932", highlightthickness=1,
+                               highlightbackground="#555b66")
         self.timeline.pack(fill=X, pady=(8, 0))
         self.timeline.bind("<Button-1>", self._timeline_press)
         self.timeline.bind("<B1-Motion>", self._timeline_drag)
@@ -159,6 +218,9 @@ class SceneTab:
         self._scene_redraw()
         # A cena vazia construida acima nao deve apagar o autosave do projeto.
         self._scene_ready = True
+        provider = _scale_provider(parent, self.app)
+        if provider is not None:
+            provider.on_apply(self._apply_scale)
 
     def refresh_language(self, _lang: str | None = None) -> None:
         """Reaplica os rotulos de cena sem tocar na cena nem na selecao."""
@@ -216,10 +278,12 @@ class SceneTab:
         return self._scene_bind_project
 
     def _scene_view(self) -> tuple[int, int, float, float]:
-        """Canvas 480x270 preservando a proporcao do formato da cena.
+        """Viewport BASE 480x270 preservando a proporcao do formato da cena.
 
-        Retorna ``(cw, ch, sx, sy)``: ``sx``/``sy`` sao usados por desenho,
-        grade, area segura, camadas e arraste para nao distorcer coordenadas.
+        Retorna ``(cw, ch, sx, sy)`` em unidades BASE: ``sx``/``sy`` sao usados
+        por desenho, grade, area segura, camadas e arraste para nao distorcer
+        coordenadas.  O fator de escala e aplicado uma unica vez no desenho e
+        invertido nas coordenadas de ponteiro (nunca acumulado via Canvas.scale).
         """
         sw = max(1, int(self.scene.get("width", 1920) or 1920))
         sh = max(1, int(self.scene.get("height", 1080) or 1080))
@@ -260,66 +324,81 @@ class SceneTab:
         except (OSError, ValueError):
             pass
 
-    def _scene_redraw(self) -> None:
+    def _scene_redraw(self, *, autosave: bool = True) -> None:
         c = self.scene_canvas
-        cw, ch, sx, sy = self._scene_view()
-        c.configure(width=cw, height=ch)
+        cw, ch, sx, sy = self._scene_view()  # coordenadas BASE
+        f = self._factor()
+        self._configure_scene_canvas()
         c.delete("all")
-        c.create_rectangle(0, 0, cw, ch, fill="#2b303b", outline="")
+        c.create_rectangle(0, 0, cw * f, ch * f, fill="#2b303b", outline="")
         if self.snap_var.get():
             grid = max(1, int(self.grid_var.get()))
-            gx = grid * sx
-            while gx < cw:
-                c.create_line(gx, 0, gx, ch, fill="#333944")
-                gx += grid * sx
-            gy = grid * sy
-            while gy < ch:
-                c.create_line(0, gy, cw, gy, fill="#333944")
-                gy += grid * sy
+            gx = grid * sx * f
+            while gx < cw * f:
+                c.create_line(gx, 0, gx, ch * f, fill="#333944")
+                gx += grid * sx * f
+            gy = grid * sy * f
+            while gy < ch * f:
+                c.create_line(0, gy, cw * f, gy, fill="#333944")
+                gy += grid * sy * f
         from .scene import safe_bounds
         sw = int(self.scene.get("width", 1920)); sh = int(self.scene.get("height", 1080))
         x1, y1, x2, y2 = safe_bounds(self.scene)
-        c.create_rectangle(x1 * sx, y1 * sy, x2 * sx, y2 * sy,
-                           outline="#d95f5f", dash=(4, 3))
+        c.create_rectangle(x1 * sx * f, y1 * sy * f, x2 * sx * f, y2 * sy * f,
+                           outline="#d95f5f",
+                           dash=(max(1, round(4 * f)), max(1, round(3 * f))))
         for index, layer in enumerate(self.scene.get("layers", [])):
-            x = float(layer.get("x", 0)) * sx
-            y = float(layer.get("y", 0)) * sy
-            w = max(6, float(layer.get("w", sw)) * sx)
-            h = max(6, float(layer.get("h", sh)) * sy)
+            x = float(layer.get("x", 0)) * sx * f
+            y = float(layer.get("y", 0)) * sy * f
+            w = max(6 * f, float(layer.get("w", sw)) * sx * f)
+            h = max(6 * f, float(layer.get("h", sh)) * sy * f)
             color = "#4a90d9" if layer.get("type") == "image" else "#d9a441"
-            c.create_rectangle(x, y, x + w, y + h, outline=color, width=2,
-                               tags=f"layer{index}")
-            c.create_rectangle(x + w - 8, y + h - 8, x + w, y + h,
+            c.create_rectangle(x, y, x + w, y + h, outline=color,
+                               width=max(1, round(2 * f)), tags=f"layer{index}")
+            c.create_rectangle(x + w - 8 * f, y + h - 8 * f, x + w, y + h,
                                fill=color, outline="", tags=f"handle{index}")
             if layer.get("type") == "text":
                 c.create_text(x + w / 2, y + h / 2, text=str(layer.get("text", ""))[:22],
                               fill="white", tags=f"layer{index}")
         self.scene_list.delete(0, END)
-        for index, layer in enumerate(self.scene.get("layers", [])):
+        layers = self.scene.get("layers", [])
+        for index, layer in enumerate(layers):
             label = (f"{index + 1}. {layer.get('type')}  "
                      f"{layer.get('text') or Path(str(layer.get('file') or '')).name}")
             self.scene_list.insert(END, label[:34])
+        # A lista e recriada no redraw: reaplicar a selecao valida mantem a
+        # camada ativa (e os campos de propriedades) apos undo/redo/add/remove.
+        selected = self.selected_layer
+        if isinstance(selected, int) and 0 <= selected < len(layers):
+            self.scene_list.selection_clear(0, END)
+            self.scene_list.select_set(selected)
+            self.scene_list.activate(selected)
         self._draw_timeline()
-        self._scene_autosave()
+        if autosave:
+            self._scene_autosave()
 
     def _draw_timeline(self) -> None:
         c = self.timeline
+        f = self._factor()
+        c.configure(height=round(90 * f))
         c.delete("all")
-        width = max(400, c.winfo_width())
+        # Largura BASE: o desenho e feito em coordenadas BASE * f.
+        width = max(400.0, c.winfo_width() / f)
         total = max(30.0, max((float(l.get("end") or 0)
                                for l in self.scene.get("layers", [])), default=0) + 5)
         self.timeline_total = total
         self.timeline_px = width / total
         for second in range(0, int(total) + 1, 5):
-            x = second * self.timeline_px
-            c.create_line(x, 0, x, 90, fill="#3a404b")
-            c.create_text(x + 4, 4, text=f"{second}s", anchor="nw", fill="#9aa4b2")
+            x = second * self.timeline_px * f
+            c.create_line(x, 0, x, 90 * f, fill="#3a404b")
+            c.create_text(x + 4 * f, 4 * f, text=f"{second}s", anchor="nw", fill="#9aa4b2")
         for index, layer in enumerate(self.scene.get("layers", [])):
             start = float(layer.get("start", 0))
             end = float(layer.get("end") or (start + 5))
             color = "#4a90d9" if layer.get("type") == "image" else "#d9a441"
-            y = 22 + index * 13
-            c.create_rectangle(start * self.timeline_px, y, end * self.timeline_px, y + 11,
+            y = (22 + index * 13) * f
+            c.create_rectangle(start * self.timeline_px * f, y,
+                               end * self.timeline_px * f, y + 11 * f,
                                fill=color, outline="", tags=f"bar{index}")
 
     def _scene_format_changed(self, _event=None) -> None:
@@ -329,8 +408,7 @@ class SceneTab:
         self.scene["height"] = height
         self.scene["preset"] = self.format_var.get()
         self.scene["safe_margin"] = margin
-        cw, ch, _sx, _sy = self._scene_view()
-        self.scene_canvas.configure(width=cw, height=ch)
+        self._configure_scene_canvas()
         self._scene_push()
         self._scene_redraw()
 
@@ -375,10 +453,11 @@ class SceneTab:
         tag = next((t for t in tags if t.startswith("layer") or t.startswith("handle")), None)
         if not tag:
             return
+        f = self._factor()
         self.selected_layer = int(tag.replace("layer", "").replace("handle", ""))
         self.drag_mode = "resize" if tag.startswith("handle") else "move"
-        self.drag_origin = (event.x, event.y)
-        # Mesmo sx/sy do desenho: clique e arraste nao distorcem coordenadas.
+        # Ponteiro em px de tela -> BASE (divide por f).  sx/sy continuam BASE.
+        self.drag_origin = (event.x / f, event.y / f)
         self.drag_scale = self._scene_view()[2:]
         self._scene_push()
         layer = self.scene["layers"][self.selected_layer]
@@ -392,8 +471,9 @@ class SceneTab:
         if self.selected_layer is None or not hasattr(self, "drag_values"):
             return
         scale_x, scale_y = getattr(self, "drag_scale", None) or self._scene_view()[2:]
-        dx = (event.x - self.drag_origin[0]) / scale_x
-        dy = (event.y - self.drag_origin[1]) / scale_y
+        f = self._factor()
+        dx = (event.x / f - self.drag_origin[0]) / scale_x
+        dy = (event.y / f - self.drag_origin[1]) / scale_y
         layer = self.scene["layers"][self.selected_layer]
         origin = self.drag_values
         if self.drag_mode == "move":
@@ -420,15 +500,17 @@ class SceneTab:
             return
         self.selected_layer = int(tag.replace("bar", ""))
         self._scene_push()
+        f = self._factor()
+        x = event.x / f  # px de tela -> BASE
         layer = self.scene["layers"][self.selected_layer]
         start = float(layer.get("start", 0)); end = float(layer.get("end") or (start + 5))
-        self.timeline_origin = (event.x, start, end, end - 5 <= event.x / self.timeline_px <= end + 5)
+        self.timeline_origin = (x, start, end, end - 5 <= x / self.timeline_px <= end + 5)
 
     def _timeline_drag(self, event) -> None:
         if not hasattr(self, "timeline_origin") or self.selected_layer is None:
             return
         x0, start, end, resize = self.timeline_origin
-        delta = (event.x - x0) / self.timeline_px
+        delta = (event.x / self._factor() - x0) / self.timeline_px
         layer = self.scene["layers"][self.selected_layer]
         if resize:
             layer["end"] = max(0.5, end + delta)
@@ -447,8 +529,7 @@ class SceneTab:
         self._scene_push()
         self.scene = {"version": 1, "width": 1920, "height": 1080, "layers": []}
         self.selected_layer = None
-        cw, ch, _sx, _sy = self._scene_view()
-        self.scene_canvas.configure(width=cw, height=ch)
+        self._configure_scene_canvas()
         self._scene_redraw()
 
     def _scene_open(self) -> None:
@@ -461,8 +542,7 @@ class SceneTab:
             self.scene = load_scene(path)
             for warning in validate_scene(self.scene):
                 self.app.append_qc(t("scene_qc_prefix", warning=warning))
-            cw, ch, _sx, _sy = self._scene_view()
-            self.scene_canvas.configure(width=cw, height=ch)
+            self._configure_scene_canvas()
             self._scene_redraw()
         except Exception as exc:
             messagebox.showerror(APP_NAME, str(exc))
@@ -529,16 +609,38 @@ class SceneTab:
         fx = dict(layer.get("fx") or {})
         top = Toplevel(self.app.root)
         top.title(t("fx_title"))
-        top.geometry("460x820")
+        top.geometry("460x680")
+        # O formulario e maior que a janela: canvas + scrollbar mantem o botao
+        # "Aplicar" alcancavel sem cortar os controles de FX.
+        shell = ttk.Frame(top)
+        shell.pack(fill=BOTH, expand=True)
+        canvas = Canvas(shell, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(shell, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill=Y)
+        canvas.pack(side="left", fill=BOTH, expand=True)
+        form = ttk.Frame(canvas)
+        form_window = canvas.create_window((0, 0), window=form, anchor="nw")
+        form.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind(
+            "<Configure>",
+            lambda e: canvas.itemconfigure(form_window, width=e.width),
+        )
+        canvas.bind("<MouseWheel>", lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
+        canvas.bind("<Button-4>", lambda _e: canvas.yview_scroll(-1, "units"))
+        canvas.bind("<Button-5>", lambda _e: canvas.yview_scroll(1, "units"))
+        self._fx_dialog = top
+        self._fx_canvas = canvas
+        self._fx_scrollbar = scrollbar
         row = 0
-        ttk.Label(top, text=t("fx_remove_bg")).grid(row=row, column=0, sticky="w", padx=8, pady=6)
+        ttk.Label(form, text=t("fx_remove_bg")).grid(row=row, column=0, sticky="w", padx=8, pady=6)
         method = StringVar(value=str(fx.get("remove_background", "none")))
-        ttk.Combobox(top, state="readonly", textvariable=method,
+        ttk.Combobox(form, state="readonly", textvariable=method,
                      values=["none", "color", "luma", "saturation", "flood"]).grid(row=row, column=1, sticky="w")
         row += 1
-        ttk.Label(top, text=t("fx_bg_color")).grid(row=row, column=0, sticky="w", padx=8)
+        ttk.Label(form, text=t("fx_bg_color")).grid(row=row, column=0, sticky="w", padx=8)
         color = StringVar(value=str(fx.get("key_color", "#FFFFFF")))
-        ttk.Entry(top, textvariable=color, width=14).grid(row=row, column=1, sticky="w")
+        ttk.Entry(form, textvariable=color, width=14).grid(row=row, column=1, sticky="w")
         row += 1
         scales: dict[str, DoubleVar] = {}
         for key, label, low, high, default in (
@@ -552,10 +654,10 @@ class SceneTab:
             ("opacity", t("fx_opacity"), 0, 1, 1),
             ("rotate", t("fx_rotate"), -180, 180, 0),
         ):
-            ttk.Label(top, text=label).grid(row=row, column=0, sticky="w", padx=8)
+            ttk.Label(form, text=label).grid(row=row, column=0, sticky="w", padx=8)
             var = DoubleVar(value=float(fx.get(key, default)))
             scales[key] = var
-            Scale(top, from_=low, to=high, resolution=(high - low) / 100,
+            Scale(form, from_=low, to=high, resolution=(high - low) / 100,
                   orient="horizontal", variable=var, length=230).grid(row=row, column=1)
             row += 1
         checks: dict[str, BooleanVar] = {}
@@ -564,13 +666,13 @@ class SceneTab:
                            ("shadow", t("fx_shadow"))):
             var = BooleanVar(value=bool(fx.get(key, False)))
             checks[key] = var
-            Checkbutton(top, text=label, variable=var).grid(row=row, column=1, sticky="w")
+            Checkbutton(form, text=label, variable=var).grid(row=row, column=1, sticky="w")
             row += 1
         # F2-I3a: tintura e sombra (fx) + Ken Burns (propriedade da camada).
-        ttk.Label(top, text=t("fx_tint")).grid(row=row, column=0, sticky="w", padx=8)
+        ttk.Label(form, text=t("fx_tint")).grid(row=row, column=0, sticky="w", padx=8)
         # Vazio = sem tintura (imagefx so aplica quando ha cor).
         tint = StringVar(value=str(fx.get("tint", "")))
-        ttk.Entry(top, textvariable=tint, width=14).grid(row=row, column=1, sticky="w")
+        ttk.Entry(form, textvariable=tint, width=14).grid(row=row, column=1, sticky="w")
         row += 1
         extra_scales: dict[str, DoubleVar] = {}
         for key, label, low, high, default in (
@@ -578,14 +680,14 @@ class SceneTab:
             ("shadow_offset", t("fx_shadow_offset"), 0, 40, 8),
             ("shadow_blur", t("fx_shadow_blur"), 0, 30, 6),
         ):
-            ttk.Label(top, text=label).grid(row=row, column=0, sticky="w", padx=8)
+            ttk.Label(form, text=label).grid(row=row, column=0, sticky="w", padx=8)
             var = DoubleVar(value=float(fx.get(key, default)))
             extra_scales[key] = var
-            Scale(top, from_=low, to=high, resolution=(high - low) / 100,
+            Scale(form, from_=low, to=high, resolution=(high - low) / 100,
                   orient="horizontal", variable=var, length=230).grid(row=row, column=1)
             row += 1
         ken_burns = BooleanVar(value=bool(layer.get("ken_burns", False)))
-        Checkbutton(top, text=t("fx_ken_burns"), variable=ken_burns).grid(
+        Checkbutton(form, text=t("fx_ken_burns"), variable=ken_burns).grid(
             row=row, column=1, sticky="w")
         row += 1
 
@@ -603,8 +705,10 @@ class SceneTab:
             self._scene_preview()
             top.destroy()
 
-        ttk.Button(top, text=t("apply"), style="Primary.TButton", command=apply).grid(
+        ttk.Button(form, text=t("apply"), style="Primary.TButton", command=apply).grid(
             row=row, column=0, columnspan=2, pady=12)
+        canvas.update_idletasks()
+        canvas.configure(scrollregion=canvas.bbox("all"))
 
     def _scene_preview(self) -> None:
         if not self.scene.get("layers"):
@@ -623,12 +727,40 @@ class SceneTab:
             time = float(layer.get("start", 0)) + 0.5
             out = Path(tempfile.gettempdir()) / "vilm-scene-preview.png"
             render_preview(scene=self.scene, background=background, time=time, output=out)
-            image = ImageTk.PhotoImage(Image.open(out))
-            self.preview_label.configure(image=image)
-            self.preview_label.image = image
+            with Image.open(out) as rendered:
+                # Copia em memoria: mudancas de escala nao re-renderizam nem
+                # gravam disco, apenas reamostram esta imagem.
+                self._preview_source = rendered.convert("RGB")
+            self._show_preview_scaled()
         except Exception as exc:
             if hasattr(self.app, "append_qc"):
                 self.app.append_qc(t("scene_preview_error", exc=exc))
+
+    def _show_preview_scaled(self) -> None:
+        """Reamostra a previa em memoria da BASE 640x360 (16:9) por ``f``.
+
+        A fonte e sempre ``_preview_source`` (o render BASE), nunca o
+        PhotoImage ja exibido, por isso reaplicar o mesmo fator nao acumula.
+        """
+        source = getattr(self, "_preview_source", None)
+        if source is None:
+            return
+        try:
+            f = self._factor()
+            # BASE do scene.render_preview e 640x360.  Os 300 do Label sao
+            # caracteres (largura do widget), nao pixels: nao sao usados aqui.
+            target_w = max(1, round(640 * f))
+            target_h = max(1, round(360 * f))
+            width, height = source.size
+            if width == target_w and height == target_h:
+                frame = source
+            else:
+                frame = source.resize((target_w, target_h))
+            image = ImageTk.PhotoImage(frame)
+            self.preview_label.configure(image=image)
+            self.preview_label.image = image
+        except Exception:
+            pass
 
 
 # Mesmo padrao dos demais tab modules: instancias fracas e hook unico, com

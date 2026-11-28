@@ -15,17 +15,37 @@ import numpy as np
 from .i18n import mark, on_language_changed, t
 
 
+def _scale_factor(widget) -> float:
+    """Fator capturado na thread principal; 1.0 sem provider (app legada)."""
+    try:
+        provider = getattr(widget.winfo_toplevel(), "ui_scale", None)
+    except Exception:
+        return 1.0
+    if provider is None:
+        return 1.0
+    try:
+        value = float(provider.factor())
+    except Exception:
+        return 1.0
+    return value if value > 0 else 1.0
+
+
 class VideoPreviewWindow:
     def __init__(self, parent: tk.Tk, path: str) -> None:
         self.parent = parent
         self.path = path
+        f = _scale_factor(parent)
         self.window = tk.Toplevel(parent)
         self.window.title(f"Preview — {path}")
-        self.canvas = tk.Canvas(self.window, width=640, height=360, bg="black")
+        self.canvas = tk.Canvas(self.window, width=round(640 * f),
+                                height=round(360 * f), bg="black")
         self.canvas.pack(fill="both", expand=True)
         ctrl = ttk.Frame(self.window)
         ctrl.pack(fill="x", padx=8, pady=4)
         self.play_var = tk.BooleanVar(value=True)
+        # Snapshot do estado de play na main thread: a worker nunca le Tk.
+        self._playing = True
+        self.play_var.trace_add("write", self._on_play_changed)
         self.play_button = ttk.Checkbutton(
             ctrl, text=t("video_preview_play"), variable=self.play_var
         )
@@ -44,7 +64,13 @@ class VideoPreviewWindow:
         self._seek_to: float | None = None
         self._duration = 0.0
         self.window.protocol("WM_DELETE_WINDOW", self._close)
-        threading.Thread(target=self._decode_loop, daemon=True).start()
+        threading.Thread(target=self._decode_loop, args=(f,), daemon=True).start()
+
+    def _on_play_changed(self, *_args) -> None:
+        try:
+            self._playing = bool(self.play_var.get())
+        except Exception:
+            self._playing = True
 
     def _close(self) -> None:
         self._running = False
@@ -77,13 +103,16 @@ class VideoPreviewWindow:
         self.status.config(text=text)
 
     def _on_seek(self, value) -> None:
-        # Mark a seek request; handled in decode loop
+        # Mark a seek request; handled in decode loop.  O slider vai de
+        # 0..duration (ver _decode_loop), entao o valor ja esta em segundos:
+        # dividir por 100 quebrava a busca para duracoes diferentes de 100 s.
         try:
-            self._seek_to = float(value) / 100.0 * self._duration
+            self._seek_to = float(value)
         except ValueError:
             pass
 
-    def _decode_loop(self) -> None:
+    def _decode_loop(self, factor: float) -> None:
+        # fator e passado pela main thread: nenhuma chamada Tcl/tk.* aqui.
         try:
             container = av.open(self.path)
             stream = container.streams.video[0]
@@ -104,13 +133,14 @@ class VideoPreviewWindow:
                         frame = next(container.decode(video=0))
                     except StopIteration:
                         break
-                if not self.play_var.get():
+                if not self._playing:
                     time.sleep(0.1)
                     continue
                 t0 = time.time()
                 img = frame.to_ndarray(format="rgb24")
                 h, w = img.shape[:2]
-                scale = min(640 / w, 360 / h)
+                # BASE 640x360, multiplicado pelo fator capturado antes da thread.
+                scale = min(640 / w, 360 / h) * factor
                 new_w = max(1, int(w * scale))
                 new_h = max(1, int(h * scale))
                 ys = (np.arange(new_h) * h // new_h).astype(int)
@@ -119,9 +149,9 @@ class VideoPreviewWindow:
                 raw = small.tobytes()
                 header = f"P6\n{new_w} {new_h}\n255\n".encode("ascii")
                 data = base64.b64encode(header + raw)
-                photo = tk.PhotoImage(data=data, format="PPM")
                 pts = float(frame.pts * stream.time_base) if frame.pts is not None else 0.0
-                self.parent.after(0, self._update_canvas, photo, new_w, new_h, pts)
+                # PhotoImage e canvas.config ficam na main thread.
+                self.parent.after(0, self._update_canvas, data, new_w, new_h, pts)
                 elapsed = time.time() - t0
                 if elapsed < frame_interval:
                     time.sleep(frame_interval - elapsed)
@@ -135,7 +165,8 @@ class VideoPreviewWindow:
         else:
             self.parent.after(0, lambda: self._set_status("video_preview_ended"))
 
-    def _update_canvas(self, photo, w, h, pts) -> None:
+    def _update_canvas(self, data, w, h, pts) -> None:
+        photo = tk.PhotoImage(data=data, format="PPM")
         self._photo = photo
         self.canvas.config(width=w, height=h)
         self.canvas.delete("all")

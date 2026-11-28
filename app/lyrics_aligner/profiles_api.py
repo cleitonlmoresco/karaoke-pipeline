@@ -38,7 +38,7 @@ def default_settings() -> dict[str, Any]:
         "alignment": copy.deepcopy(karaoke_jobs.DEFAULT_ALIGNMENT),
         "karaoke": copy.deepcopy(karaoke_jobs.DEFAULT_KARAOKE),
         "background": copy.deepcopy(karaoke_jobs.DEFAULT_BACKGROUND),
-        "output": {"width": 1920, "height": 1080},
+        "output": {"width": 1920, "height": 1080, "fps": 30},
         "burn": {"preset": "medium", "crf": 18},
         "demo": False,
     }
@@ -60,21 +60,17 @@ def _read_profiles(path: str | Path | None = None) -> tuple[dict[str, Any], bool
     return data, bom
 
 
-def _write_profiles(payload: Mapping[str, Any], path: str | Path | None = None) -> Path:
-    """Atomically replace the profiles file.
+def _read_bytes(target: Path) -> bytes | None:
+    """Read the current bytes of a file, or ``None`` when it is unreadable."""
+    try:
+        return target.read_bytes()
+    except OSError:
+        return None
 
-    The new bytes are written to a sibling temporary file, flushed and
-    fsynced, then moved with ``os.replace``.  A failure at any point leaves
-    the original file byte-for-byte intact and removes the temporary file.
-    """
-    target = profiles_path(path)
-    _, bom = _read_profiles(target)
+
+def _atomic_write_bytes(target: Path, data: bytes) -> None:
+    """Replace ``target`` with ``data`` via temp file, fsync and ``os.replace``."""
     target.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(dict(payload), ensure_ascii=False, indent=2) + "\n"
-    data = text.encode("utf-8")
-    if bom:
-        data = codecs.BOM_UTF8 + data
-
     fd, temp_name = tempfile.mkstemp(
         prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent)
     )
@@ -95,6 +91,38 @@ def _write_profiles(payload: Mapping[str, Any], path: str | Path | None = None) 
         except OSError:
             pass
         raise
+
+
+def _same_payload(raw: bytes | None, payload: Mapping[str, Any]) -> bool:
+    """True when the file already holds the same JSON object (any formatting)."""
+    if raw is None:
+        return False
+    try:
+        current = json.loads(raw.decode("utf-8-sig"))
+    except (ValueError, UnicodeError):
+        return False
+    return isinstance(current, dict) and current == dict(payload)
+
+
+def _write_profiles(payload: Mapping[str, Any], path: str | Path | None = None) -> Path:
+    """Atomically replace the profiles file, but never rewrite identical data.
+
+    Both the parsed payload and the exact bytes are compared with what is on
+    disk before a temporary file is created; an unchanged save therefore does
+    not bump the mtime.  An existing UTF-8 BOM is preserved on a real change.
+    """
+    target = profiles_path(path)
+    raw = _read_bytes(target)
+    bom = bool(raw and raw.startswith(codecs.BOM_UTF8))
+    if _same_payload(raw, payload):
+        return target
+    text = json.dumps(dict(payload), ensure_ascii=False, indent=2) + "\n"
+    data = text.encode("utf-8")
+    if bom:
+        data = codecs.BOM_UTF8 + data
+    if raw == data:
+        return target
+    _atomic_write_bytes(target, data)
     return target
 
 
@@ -179,6 +207,9 @@ def create_profile(
         profile["settings"] = default_settings()
     extra_base = profile.get("extras") if isinstance(profile.get("extras"), dict) else {}
     profile["extras"] = _deep_merge(extra_base, extras or {}) if extras else copy.deepcopy(extra_base)
+    # Validate before touching the file: bad fps/font values must never reach
+    # a saved profile (and therefore never reach ffmpeg/ASS).
+    karaoke_jobs.validate_profile_values(profile["settings"], allow_font_fallback=False)
 
     profiles[key] = profile
     _write_profiles(payload, path)
@@ -228,6 +259,10 @@ def update_profile(
         profile["projects_root"] = projects_root
     if display_name is not None:
         profile["name"] = display_name
+    if settings:
+        # Only the values supplied by the caller are validated: an unrelated
+        # edit must not be blocked by an old profile's legacy values.
+        karaoke_jobs.validate_profile_values(settings, allow_font_fallback=False)
     _write_profiles(payload, path)
     return copy.deepcopy(profile)
 
@@ -253,19 +288,20 @@ def save_profile_settings(
 
 
 def activate_profile(name: str, path: str | Path | None = None) -> str:
-    payload = load_profiles(path)
-    if name not in payload["profiles"]:
-        raise ValueError(f"Perfil '{name}' nao encontrado. Use 'profiles' para listar.")
-    payload["active"] = name
-    _write_profiles(payload, path)
-    return name
+    """Deprecated compat alias that mirrors ``settings.json.profile``.
+
+    Kept with the original signature/return value for legacy callers.  It only
+    forwards to :func:`set_active_profile`, the single owner of the activation
+    write (``profiles.json.active`` + ``settings.json.profile`` + rollback).
+    The legacy signature has no ``settings_path`` parameter, so under isolation
+    new code must call :func:`set_active_profile` with explicit paths instead.
+    No current internal caller activates through here.
+    """
+    return set_active_profile(name, profiles_path=path)
 
 
 def _original_bytes(target: Path) -> bytes | None:
-    try:
-        return target.read_bytes()
-    except OSError:
-        return None
+    return _read_bytes(target)
 
 
 def _restore_bytes(target: Path, raw: bytes | None) -> None:
@@ -275,30 +311,54 @@ def _restore_bytes(target: Path, raw: bytes | None) -> None:
             if target.exists():
                 target.unlink()
             return
-        target.parent.mkdir(parents=True, exist_ok=True)
-        fd, temp_name = tempfile.mkstemp(
-            prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent)
-        )
-        temp_path = Path(temp_name)
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(raw)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp_path, target)
-        except BaseException:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-            try:
-                temp_path.unlink()
-            except OSError:
-                pass
-            raise
+        if _read_bytes(target) == raw:
+            return
+        _atomic_write_bytes(target, raw)
     except OSError:
         # Never mask the original failure with a cleanup failure.
         pass
+
+
+_UNSET = object()
+
+
+def _commit_profile_changes(
+    payload: Mapping[str, Any] | None,
+    active_name: str | None | object,
+    *,
+    profiles_path: str | Path | None,
+    settings_path: str | Path | None,
+    settings_payload: Mapping[str, Any] | None = None,
+) -> None:
+    """Commit the two files that own the active profile as one logical write.
+
+    ``payload`` (when given) replaces profiles.json; ``active_name`` (unless
+    ``_UNSET``) is mirrored into ``settings.json.profile``.  When
+    ``settings_payload`` is supplied it becomes the whole settings update, with
+    ``profile`` overwritten by the active name; otherwise only ``profile`` is
+    written.  Either way there is exactly one ``update_settings`` call.  Both
+    writers skip unchanged bytes.  If either step fails, both files are restored
+    to their original bytes before the exception is re-raised.
+    """
+    from . import settings as settings_module
+
+    profiles_target = _resolve_profiles_path(profiles_path)
+    settings_target = settings_module.settings_path(settings_path)
+    saved_profiles = _original_bytes(profiles_target)
+    saved_settings = _original_bytes(settings_target)
+    try:
+        if payload is not None:
+            _write_profiles(payload, profiles_path)
+        if active_name is not _UNSET:
+            settings_update = (
+                dict(settings_payload) if settings_payload is not None else {}
+            )
+            settings_update["profile"] = "" if active_name is None else active_name
+            settings_module.update_settings(settings_update, settings_path)
+    except BaseException:
+        _restore_bytes(profiles_target, saved_profiles)
+        _restore_bytes(settings_target, saved_settings)
+        raise
 
 
 def set_active_profile(
@@ -306,71 +366,96 @@ def set_active_profile(
     *,
     profiles_path: str | Path | None = None,
     settings_path: str | Path | None = None,
+    settings_payload: Mapping[str, Any] | None = None,
 ) -> str:
     """Activate ``name`` with a single owner for the active profile.
 
     ``profiles.json.active`` and ``settings.json.profile`` are written together
-    through the existing atomic writers.  ``activate_profile`` is left intact
-    for backwards compatibility and is called exactly once here (no double
-    write).  Any failure rolls both files back to their previous bytes.
+    through :func:`_commit_profile_changes`.  A caller-provided
+    ``settings_payload`` (e.g. the full settings tab payload) is written in the
+    same single ``settings.json`` write, with ``profile`` forced to ``name``.
+    No legacy activation helper is called here (there is exactly one internal
+    writer of each file).  Any failure rolls both files back to their previous
+    bytes.
     """
-    from . import settings as settings_module
-
     # Validate before touching either file: a bad name leaves no trace.
-    if name not in load_profiles(profiles_path)["profiles"]:
+    payload = load_profiles(profiles_path)
+    if name not in payload["profiles"]:
         raise ValueError(f"Perfil '{name}' nao encontrado. Use 'profiles' para listar.")
 
-    profiles_target = _resolve_profiles_path(profiles_path)
-    settings_target = settings_module.settings_path(settings_path)
-    saved_profiles = _original_bytes(profiles_target)
-    saved_settings = _original_bytes(settings_target)
-    try:
-        activate_profile(name, profiles_path)
-        settings_module.update_settings({"profile": name}, settings_path)
-    except BaseException:
-        _restore_bytes(profiles_target, saved_profiles)
-        _restore_bytes(settings_target, saved_settings)
-        raise
+    updated = dict(payload)
+    updated["active"] = name
+    _commit_profile_changes(
+        updated,
+        name,
+        profiles_path=profiles_path,
+        settings_path=settings_path,
+        settings_payload=settings_payload,
+    )
     return name
 
 
 def delete_profile(
-    name: str, path: str | Path | None = None, *, force: bool = False
+    name: str,
+    path: str | Path | None = None,
+    *,
+    force: bool = False,
+    settings_path: str | Path | None = None,
 ) -> bool:
     """Remove a profile.
 
     Removing the active profile is refused with ``ValueError`` unless
     ``force=True``; in that case the first remaining profile becomes active
     (or ``None`` when the deleted profile was the last one).  Nothing is
-    changed when the guard fires.  ``path`` remains positional for backwards
-    compatibility; ``force`` is keyword-only.
+    changed when the guard fires.  When the active name changes,
+    ``settings.json.profile`` is updated in the same logical transaction (with
+    rollback).  ``path`` stays positional for backwards compatibility;
+    ``force`` and ``settings_path`` are keyword-only.
     """
     payload = load_profiles(path)
     profiles = payload["profiles"]
     if name not in profiles:
         return False
-    if payload.get("active") == name and not force:
+    was_active = payload.get("active") == name
+    if was_active and not force:
         raise ValueError(
             f"Perfil ativo '{name}' nao pode ser excluido sem force=True."
         )
     profiles.pop(name)
-    if payload.get("active") == name:
+    new_active = _UNSET
+    if was_active:
         payload["active"] = next(iter(profiles), None)
-    _write_profiles(payload, path)
+        new_active = payload["active"]
+    _commit_profile_changes(
+        payload, new_active, profiles_path=path, settings_path=settings_path
+    )
     return True
 
 
 def rename_profile(
-    old_name: str, new_name: str, path: str | Path | None = None
+    old_name: str,
+    new_name: str,
+    path: str | Path | None = None,
+    *,
+    settings_path: str | Path | None = None,
 ) -> str:
+    """Rename a profile, mirroring a renamed *active* profile into settings.
+
+    Both files are committed together with rollback; a rename that does not
+    change the active name never touches ``settings.json``.
+    """
     key = _validate_name(new_name)
     payload = load_profiles(path)
     if old_name not in payload["profiles"]:
         raise ValueError(f"Perfil '{old_name}' nao encontrado. Use 'profiles' para listar.")
     if key != old_name and key in payload["profiles"]:
         raise ValueError(f"Perfil '{key}' ja existe.")
+    was_active = payload.get("active") == old_name
     payload["profiles"][key] = payload["profiles"].pop(old_name)
-    if payload.get("active") == old_name:
+    if was_active:
         payload["active"] = key
-    _write_profiles(payload, path)
+    _commit_profile_changes(
+        payload, key if (was_active and key != old_name) else _UNSET,
+        profiles_path=path, settings_path=settings_path,
+    )
     return key

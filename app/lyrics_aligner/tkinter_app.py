@@ -29,6 +29,7 @@ import tkinter as tk
 import weakref
 from pathlib import Path
 from tkinter import ttk
+from typing import Any, Mapping
 
 from . import i18n as i18n_module
 from . import profiles_api
@@ -36,10 +37,12 @@ from . import settings as settings_module
 from .i18n import available_languages, language_label, mark, t
 from .platform_paths import application_data_root
 from .project_context import ProjectContext
+from .ui_scale import UiScale
 
 APP_VERSION = "1.3.0"
 
-# Ordem publica das 7 abas.  Todas as chaves existem em pt/en/ko (492 cada).
+# Ordem publica das 7 abas.  Todas as chaves existem em pt/en/ko (mesmo numero
+# de chaves por idioma; a contagem exata e mantida por i18n.py).
 TAB_SPECS = (
     ("tab_projects", "tab_projects"),
     ("tab_production", "tab_production"),
@@ -112,6 +115,13 @@ class VilmTkApp:
         self._lyrics = ""
         self._project_items: dict[str, object] = {}
 
+        # Escala visual capturada ANTES de geometry/tema: os tamanhos BASE das
+        # named fonts sao guardados aqui, sem acumular sobre valores escalados.
+        # Nenhuma chave nova em settings.json e nenhum controle manual de zoom.
+        self.ui_scale = UiScale(root)
+        root.ui_scale = self.ui_scale
+        self.ui_scale.on_apply(self._apply_scaled_theme)
+
         self.root.title(t("app_title"))
         mark(self.root, "app_title", kind="title")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -136,6 +146,8 @@ class VilmTkApp:
         self._build_eager_tabs()
         self._setup_shortcuts()
         self._register_language_hook()
+        # A janela ja existe: so agora inscreve o debounce de <Configure>.
+        self.ui_scale.bind_root()
         self.root.after(100, self._poll_events)
 
     # ---- funil unico de idioma ------------------------------------------
@@ -164,8 +176,11 @@ class VilmTkApp:
         """Aplica ``code`` com exatamente uma escrita de ``ui_language``."""
         codes = available_languages()
         if code not in codes:
+            self.set_status(t("error_msg", exc="idioma invalido"))
             return False
         i18n_module.set_language(code)
+        saved = True
+        failure = ""
         try:
             updated = settings_module.update_settings(
                 {"ui_language": code}, self.settings_path
@@ -173,12 +188,18 @@ class VilmTkApp:
             if isinstance(updated, dict):
                 self.preferences.update(updated)
                 self.settings.update(updated)
-        except OSError:
-            pass
+        except (OSError, ValueError) as exc:
+            # Nao informar sucesso quando a gravacao da preferencia falhou.
+            saved = False
+            failure = t("error_msg", exc=exc)
+            self.log(failure)
         self.ui_language = code
         i18n_module.retranslate(self.root)
-        self.set_status(t("language_saved", lang=language_label(code)))
-        return True
+        if saved:
+            self.set_status(t("language_saved", lang=language_label(code)))
+        else:
+            self.set_status(failure or t("error_msg", exc="falha ao salvar"))
+        return saved
 
     # ---- menu -----------------------------------------------------------
     def _build_menu(self) -> None:
@@ -194,6 +215,12 @@ class VilmTkApp:
         mark(config_menu, "config_window_title", kind="menu", index=config_menu.index("end"))
         config_menu.add_command(label=t("menu_advanced"), command=self._open_advanced_config)
         mark(config_menu, "menu_advanced", kind="menu", index=config_menu.index("end"))
+        # O log e sempre criado; o menu apenas mostra/oculta o painel ja existente.
+        self._log_var = tk.BooleanVar(value=True)
+        config_menu.add_checkbutton(
+            label=t("log_section"), variable=self._log_var, command=self._toggle_log
+        )
+        mark(config_menu, "log_section", kind="menu", index=config_menu.index("end"))
         menubar.add_cascade(label=t("menu_config"), menu=config_menu)
         mark(menubar, "menu_config", kind="menu", index=menubar.index("end"))
 
@@ -227,6 +254,7 @@ class VilmTkApp:
             self.root, textvariable=self.status_var, anchor="w"
         )
         self.status_bar.pack(fill=tk.X, side=tk.BOTTOM, padx=6, pady=2)
+        self.ui_scale.register_pack(self.status_bar, 6, 2)
 
     def _on_ui_thread(self) -> bool:
         return threading.current_thread() is threading.main_thread()
@@ -239,15 +267,44 @@ class VilmTkApp:
             self.root.after(0, lambda: self.status_var.set(value))
 
     def _build_log(self) -> None:
-        """Cria o log uma unica vez, na casca, antes de qualquer aba."""
+        """Cria e empacota o log uma unica vez, antes de qualquer aba.
+
+        O painel fica entre o notebook e a barra de status, com altura de tres
+        linhas: ``app.log()`` e visivel sem roubar espaco das abas.  O menu
+        Configuracoes -> Log permite oculta-lo e mostra-lo novamente.
+        """
         frame = ttk.Frame(self.root)
         label = ttk.Label(frame, text=t("log_section"))
         mark(label, "log_section")
-        label.pack(anchor="w")
-        self.log_text = tk.Text(frame, height=8, state=tk.DISABLED, wrap=tk.WORD)
-        self.log_text.pack(fill=tk.BOTH, expand=True)
-        # O frame nao e empacotado: o log existe, mas nao ocupa a janela.
+        label.pack(side=tk.LEFT, anchor="w", padx=(0, 6))
+        self.log_text = tk.Text(frame, height=3, state=tk.DISABLED, wrap=tk.WORD)
+        self.log_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        frame.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=(0, 2))
+        self.ui_scale.register_pack(frame, 6, (0, 2))
         self._log_frame = frame
+        self._log_visible = True
+
+    def _toggle_log(self) -> None:
+        """Mostra/oculta o painel de log sem destruir seu conteudo."""
+        visible = bool(self._log_var.get()) if hasattr(self, "_log_var") else not getattr(
+            self, "_log_visible", True
+        )
+        frame = getattr(self, "_log_frame", None)
+        if frame is None:
+            return
+        if visible and not frame.winfo_manager():
+            # ``after=status_bar`` preserva a ordem original: status na base,
+            # log imediatamente acima dele.
+            # Repack manual precisa dos mesmos paddings escalados; sem isso o
+            # log voltaria aos valores BASE ao ser mostrado de novo.
+            frame.pack(side=tk.BOTTOM, fill=tk.X,
+                       padx=self.ui_scale.scale_pad(6),
+                       pady=self.ui_scale.scale_pad((0, 2)),
+                       after=self.status_bar)
+            frame.tkraise()
+        elif not visible and frame.winfo_manager():
+            frame.pack_forget()
+        self._log_visible = bool(frame.winfo_manager())
 
     def log(self, text: str) -> None:
         value = str(text)
@@ -267,6 +324,7 @@ class VilmTkApp:
     def _build_header(self) -> None:
         header = ttk.Frame(self.root)
         header.pack(fill=tk.X, padx=6, pady=(6, 2))
+        self.ui_scale.register_pack(header, 6, (6, 2))
         self.header_frame = header
 
         label = ttk.Label(header, text=t("header_project"))
@@ -358,6 +416,7 @@ class VilmTkApp:
     def _build_notebook(self) -> None:
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        self.ui_scale.register_pack(self.notebook, 6, 6)
         for index, (attribute, key) in enumerate(TAB_SPECS):
             frame = ttk.Frame(self.notebook)
             setattr(self, attribute, frame)
@@ -483,7 +542,21 @@ class VilmTkApp:
                 for handler in list(self._handlers.get(kind, ())):
                     try:
                         handler(payload)
-                    except Exception:
+                    except Exception as exc:
+                        # Nunca engole o erro: registra o handler e continua a fila.
+                        name = getattr(handler, "__name__", repr(handler))
+                        message = (
+                            f"Erro no handler do evento '{kind}' "
+                            f"({name}): {type(exc).__name__}: {exc}"
+                        )
+                        try:
+                            self.log(message)
+                        except Exception:
+                            pass
+                        try:
+                            self.set_status(t("error_msg", exc=exc))
+                        except Exception:
+                            pass
                         continue
         except queue.Empty:
             pass
@@ -663,8 +736,15 @@ class VilmTkApp:
             except OSError as exc:
                 self.log(t("open_auto_error", exc=exc))
 
-    def set_active_profile(self, name: str) -> bool:
-        """Unico dono da troca de perfil (grava active + profile juntos)."""
+    def set_active_profile(
+        self, name: str, *, settings_payload: Mapping[str, Any] | None = None
+    ) -> bool:
+        """Unico dono da troca de perfil (grava active + profile juntos).
+
+        ``settings_payload`` (quando fornecido) e gravado na mesma unica chamada
+        a ``update_settings``, com ``profile`` sobrescrito para ``name``.  A
+        sincronizacao em memoria (preferences/settings/combo) continua aqui.
+        """
         name = str(name or "").strip()
         if not name:
             return False
@@ -673,6 +753,7 @@ class VilmTkApp:
                 name,
                 profiles_path=self.profiles_path,
                 settings_path=self.settings_path,
+                settings_payload=settings_payload,
             )
         except (ValueError, OSError) as exc:
             self.set_status(t("error_msg", exc=exc))
@@ -735,6 +816,15 @@ class VilmTkApp:
         raise AttributeError(name)
 
     # ---- tema / fechamento ---------------------------------------------
+    def _apply_scaled_theme(self) -> None:
+        """Reaplica o tema com a fonte escalada, sem gravar e sem retranslate.
+
+        Chamado pelo ``UiScale.on_apply`` depois que fonts/paddings ja foram
+        reconfigurados.  A escala e in place: nenhuma aba e reconstruida e o
+        funil de idioma (``retranslate``) nao e tocado.
+        """
+        self._apply_theme(self.preferences)
+
     def _apply_theme(self, cfg: dict) -> None:
         try:
             bg = cfg.get("bg_color", "#F4EFE0")
@@ -746,7 +836,7 @@ class VilmTkApp:
             self.root.configure(bg=bg)
             style = ttk.Style()
             style.configure(".", background=bg, foreground=fg,
-                            font=(font_family, font_size))
+                            font=self.ui_scale.font(font_family, font_size))
             style.configure("TFrame", background=bg)
             style.configure("TLabel", background=bg, foreground=fg)
             style.configure("TButton", background=btn_bg, foreground=fg)

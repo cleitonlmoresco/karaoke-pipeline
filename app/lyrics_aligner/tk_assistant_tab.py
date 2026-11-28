@@ -105,7 +105,12 @@ class AssistantTab:
         return str(value).strip() if isinstance(value, str) else ""
 
     def _get_lyrics(self) -> str:
-        """Ler a letra pela fachada da casca, sem exigir aba construida."""
+        """Ler a letra exclusivamente pela fachada da casca.
+
+        ``app.lyrics_text()`` e a fonte primaria; quando ela esta vazia, os
+        cues de ``app.cues()`` sao usados como letra (um texto por cue).  Nenhum
+        widget alheio e acessado diretamente e nenhum ``StringVar`` e lido aqui.
+        """
         getter = getattr(self.app, "lyrics_text", None)
         if callable(getter):
             try:
@@ -114,19 +119,19 @@ class AssistantTab:
                 lyrics = ""
             if lyrics:
                 return lyrics
-        for name in ("pipeline_tab", "production_tab"):
-            tab = getattr(self.app, name, None)
-            if tab is None:
-                continue
-            widget = getattr(tab, "lyrics_text", None)
-            if callable(widget) and not hasattr(widget, "get"):
-                try:
-                    widget = widget()
-                except Exception:
-                    continue
-            lyrics = self._lyrics_from(widget)
-            if lyrics:
-                return lyrics
+        cues_getter = getattr(self.app, "cues", None)
+        if callable(cues_getter):
+            try:
+                cues = cues_getter() or []
+            except Exception:
+                cues = []
+            lines = [
+                str(getattr(cue, "text", "")).strip()
+                for cue in cues
+                if str(getattr(cue, "text", "")).strip()
+            ]
+            if lines:
+                return "\n".join(lines)
         return ""
 
     def _detect_refrains(self) -> None:
@@ -148,10 +153,12 @@ class AssistantTab:
         from .assistant_helpers import spell_check_prompt
         from .opencode_bridge import run_prompt
         prompt = spell_check_prompt(lyrics)
+        # Snapshot na main thread: a worker nunca le StringVar diretamente.
+        model = self.v_model.get() or None
 
         def worker():
             try:
-                resp = run_prompt(prompt, model=self.v_model.get() or None)
+                resp = run_prompt(prompt, model=model)
                 self.app.root.after(0, lambda: self._show(resp))
             except Exception as exc:
                 self.app.root.after(0, lambda: self._show(t("error_msg", exc=exc)))
@@ -167,10 +174,12 @@ class AssistantTab:
         from .assistant_helpers import translate_lyrics_prompt
         from .opencode_bridge import run_prompt
         prompt = translate_lyrics_prompt(lyrics, lang)
+        # Snapshot na main thread: a worker nunca le StringVar diretamente.
+        model = self.v_model.get() or None
 
         def worker():
             try:
-                resp = run_prompt(prompt, model=self.v_model.get() or None)
+                resp = run_prompt(prompt, model=model)
                 self.app.root.after(0, lambda: self._show(resp))
             except Exception as exc:
                 self.app.root.after(0, lambda: self._show(t("error_msg", exc=exc)))
@@ -182,11 +191,13 @@ class AssistantTab:
         prompt = self.prompt_text.get("1.0", tk.END).strip()
         if not prompt:
             return
+        # Snapshot na main thread: a worker nunca le StringVar diretamente.
+        model = self.v_model.get() or None
 
         def worker() -> None:
             self.app.root.after(0, lambda: self.progress.start(10))
             try:
-                resp = run_prompt(prompt, model=self.v_model.get() or None)
+                resp = run_prompt(prompt, model=model)
                 self.app.root.after(0, lambda: self._show(resp))
             except Exception as exc:
                 self.app.root.after(0, lambda: self._show(t("error_msg", exc=exc)))
